@@ -27,7 +27,7 @@ th, td {
       <th>Extension</th>
       <th>Name</th>
 <?php
-      if ($showuri) { echo "      <th>URI</th>"; }
+      if (!empty($showuri)) { echo "      <th>URI</th>"; }
 ?>
       <th>Brand</th>
       <th>Model</th>
