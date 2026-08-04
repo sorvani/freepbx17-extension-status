@@ -23,11 +23,28 @@ sudo ./install.sh
 Then open `https://YOUR-PBX/custom/extensionstatus.php` while logged in to the
 FreePBX admin GUI.
 
-To also enable NOTIFY verification, which needs one log permission change:
-
-```bash
-ENABLE_VERIFY_LOG=1 sudo -E ./install.sh
-```
+> [!IMPORTANT]
+> **The default install makes one permission change outside the install
+> directory.** To let the page confirm that a handset acted on a check-sync, it
+> gives the web server read access to the Apache access log:
+>
+> ```
+> /var/log/apache2/other_vhosts_access.log  ->  group asterisk, mode 640
+> ```
+>
+> That single file only — `error.log` and everything else under `/var/log` are
+> untouched — plus a `postrotate` hook in `/etc/logrotate.d/apache2` so rotation
+> does not undo it. The logrotate config is backed up first and validated with
+> `logrotate -d`.
+>
+> To install without it:
+>
+> ```bash
+> ENABLE_VERIFY_LOG=0 sudo -E ./install.sh
+> ```
+>
+> Everything except the verification line works identically either way. See
+> [Verification](#verification).
 
 ### Install details
 
@@ -100,36 +117,51 @@ polls for that fetch, then reports `✓ Config fetched 17:10:08` or, after 30s,
 `✕ No config fetch in 30s`. The log is only read after a click — never on page
 load or auto-refresh.
 
-This needs the web server to be able to read the access log, which is
-`root:adm 0640` by default while the page runs as `asterisk`. Either:
+#### What it needs, and why
 
-```bash
-ENABLE_VERIFY_LOG=1 sudo -E ./install.sh
-```
+The access log is `root:adm 0640` and the page runs as `asterisk`, so the web
+server cannot read it out of the box. `install.sh` grants exactly that, and
+nothing more:
 
-or by hand:
+| Change | Scope |
+| --- | --- |
+| `chgrp asterisk` + `chmod 640` on `other_vhosts_access.log` | that one file |
+| `postrotate` hook in `/etc/logrotate.d/apache2` | keeps the above across rotation |
+
+`error.log` stays `root:adm`. Nothing else under `/var/log` is touched.
+
+Adding `asterisk` to the `adm` group would also work and is the more usual
+reflex — **don't**. On a stock FreePBX 17 box that grants a web-facing process
+read on ~92 files, including `/var/log/auth.log`.
+
+By hand, if you would rather not run the installer:
 
 ```bash
 sudo chgrp asterisk /var/log/apache2/other_vhosts_access.log
 sudo chmod 640 /var/log/apache2/other_vhosts_access.log
 ```
 
-and, to survive rotation, in the `postrotate` block of
-`/etc/logrotate.d/apache2`:
+and in the `postrotate` block of `/etc/logrotate.d/apache2`:
 
 ```bash
 chgrp asterisk /var/log/apache2/other_vhosts_access.log 2>/dev/null || true
 chmod 640 /var/log/apache2/other_vhosts_access.log 2>/dev/null || true
 ```
 
-Only that one file. Adding `asterisk` to the `adm` group would work too, but on
-a stock box that grants a web-facing process read on ~92 files including
-`/var/log/auth.log` — don't.
+#### Turning it off
 
-**Verification is entirely optional.** If you would rather not touch log
-permissions, change nothing, or set `$es_access_log = ''`. The page detects that
-the log is unreadable and simply omits the check — no warning, no error line,
-everything else works exactly the same. The NOTIFY buttons do not depend on it.
+Verification is the only part of the page that needs anything outside the
+install directory, and it is entirely optional:
+
+```bash
+ENABLE_VERIFY_LOG=0 sudo -E ./install.sh   # at install time
+```
+
+or afterwards, set `$es_access_log = ''` at the top of `extensionstatus.php`.
+
+Either way the page notices the log is unreadable and simply omits the check —
+no warning, no error line, no failed state. The NOTIFY buttons themselves do
+not depend on it.
 
 ### A note on timing
 

@@ -11,10 +11,11 @@ SRC="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # there, so an upgrade will not clobber it. Override with DEST=... ./install.sh
 DEST="${DEST:-/var/www/html/custom}"
 
-# Opt in to the verification feature, which needs the web server to be able to
-# read the Apache access log:  ENABLE_VERIFY_LOG=1 sudo -E ./install.sh
-# Off by default - it is a permission change, and the page works without it.
-ENABLE_VERIFY_LOG="${ENABLE_VERIFY_LOG:-0}"
+# NOTIFY verification needs the web server to be able to read the Apache access
+# log, so this grants that: chgrp asterisk on that one file, plus a logrotate
+# hook to keep it. On by default; to skip it:
+#   ENABLE_VERIFY_LOG=0 sudo -E ./install.sh
+ENABLE_VERIFY_LOG="${ENABLE_VERIFY_LOG:-1}"
 ACCESS_LOG="${ACCESS_LOG:-/var/log/apache2/other_vhosts_access.log}"
 LOGROTATE_CONF="${LOGROTATE_CONF:-/etc/logrotate.d/apache2}"
 
@@ -84,8 +85,19 @@ if [ "$ENABLE_VERIFY_LOG" = "1" ]; then
             if grep -q 'extensionstatus.php reads this log' "$LOGROTATE_CONF"; then
                 echo "    logrotate hook already present"
             else
-                cp -a "$LOGROTATE_CONF" "$LOGROTATE_CONF.bak.$(date +%Y%m%d%H%M%S)"
-                awk -v log="$ACCESS_LOG" '
+                # Backups must NOT land in /etc/logrotate.d: logrotate reads
+                # every file in that directory, so a copy of the apache2 stanza
+                # sitting beside it produces "duplicate log entry" errors on
+                # every run.
+                BDIR=/var/backups
+                [ -d "$BDIR" ] || BDIR=/root
+                LRBAK="$BDIR/logrotate-$(basename "$LOGROTATE_CONF").$(date +%Y%m%d%H%M%S)"
+                cp -a "$LOGROTATE_CONF" "$LRBAK"
+                echo "    backed up $LOGROTATE_CONF -> $LRBAK"
+
+                # 'log' is a gawk builtin - the variable must not be called that.
+                TMP="$(mktemp)"
+                awk -v logfile="$ACCESS_LOG" '
                     { lines[NR] = $0 }
                     END {
                         last = 0
@@ -93,26 +105,35 @@ if [ "$ENABLE_VERIFY_LOG" = "1" ]; then
                         for (i = 1; i <= NR; i++) {
                             if (i == last) {
                                 print "\t\t# extensionstatus.php reads this log to confirm a check-sync landed"
-                                print "\t\tchgrp asterisk " log " 2>/dev/null || true"
-                                print "\t\tchmod 640 " log " 2>/dev/null || true"
+                                print "\t\tchgrp asterisk " logfile " 2>/dev/null || true"
+                                print "\t\tchmod 640 " logfile " 2>/dev/null || true"
                             }
                             print lines[i]
                         }
-                    }' "$LOGROTATE_CONF" > "$LOGROTATE_CONF.new"
-                mv "$LOGROTATE_CONF.new" "$LOGROTATE_CONF"
+                    }' "$LOGROTATE_CONF" > "$TMP" \
+                    || { rm -f "$TMP"; die "failed to rewrite $LOGROTATE_CONF (original untouched)"; }
+                [ -s "$TMP" ] || { rm -f "$TMP"; die "rewrite of $LOGROTATE_CONF produced an empty file (original untouched)"; }
+
+                cat "$TMP" > "$LOGROTATE_CONF"
+                rm -f "$TMP"
                 chown root:root "$LOGROTATE_CONF"
                 chmod 644 "$LOGROTATE_CONF"
-                logrotate -d "$LOGROTATE_CONF" >/dev/null 2>&1 \
-                    || die "logrotate rejected $LOGROTATE_CONF -- restore the .bak alongside it"
-                echo "    logrotate postrotate hook added"
+
+                # Validate the WHOLE config, not just this file - that is what
+                # cron actually runs, and it is where duplicate-entry errors show.
+                if ! logrotate -d /etc/logrotate.conf 2>&1 | grep -qiE '^error:'; then
+                    echo "    logrotate postrotate hook added"
+                else
+                    cp -a "$LRBAK" "$LOGROTATE_CONF"
+                    die "logrotate reported errors -- reverted $LOGROTATE_CONF from $LRBAK"
+                fi
             fi
         fi
     fi
 else
-    echo "==> NOTIFY verification not enabled (no permission changes made)"
+    echo "==> NOTIFY verification skipped (ENABLE_VERIFY_LOG=0, no permission changes)"
     echo "    the page works fully without it; it just will not confirm that a"
-    echo "    handset acted on a check-sync. To enable:"
-    echo "      ENABLE_VERIFY_LOG=1 sudo -E ./install.sh"
+    echo "    handset acted on a check-sync."
 fi
 
 cat <<EOF
@@ -125,3 +146,17 @@ The page refuses anything without an admin session. It exposes every
 extension's public IP, device model and firmware, and it can reboot and
 factory-reset handsets -- do not weaken that check.
 EOF
+
+if [ "$ENABLE_VERIFY_LOG" = "1" ]; then
+cat <<EOF
+
+This install made ONE permission change outside $DEST:
+
+  $ACCESS_LOG  ->  group asterisk, mode 640
+
+so the page can confirm a handset acted on a check-sync. Nothing else in
+/var/log is affected. To install without it:
+
+  ENABLE_VERIFY_LOG=0 sudo -E ./install.sh
+EOF
+fi
