@@ -14,10 +14,19 @@ Tested on Debian 12 (bookworm), FreePBX 17, Asterisk 22.10.1, PHP 8.2 under
 
 ## Install
 
+Three files, all into the same directory:
+
 ```bash
-sudo install -o asterisk -g asterisk -m 644 extensionstatus.php \
-  /var/www/html/custom/extensionstatus.php
+for f in extensionstatus.php extensionstatus.lib.php extensionstatus.view.php; do
+  sudo install -o asterisk -g asterisk -m 644 "$f" "/var/www/html/custom/$f"
+done
 ```
+
+| File | Contents |
+| --- | --- |
+| `extensionstatus.php` | configuration, access control, request routing |
+| `extensionstatus.lib.php` | AMI access, User-Agent parsing, NOTIFY dispatch |
+| `extensionstatus.view.php` | markup, styling, browser code |
 
 Then open `https://YOUR-PBX/custom/extensionstatus.php` while logged in to the
 FreePBX admin GUI.
