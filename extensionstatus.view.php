@@ -126,6 +126,90 @@
   #toast div.ok { background: #2e7d32; }
   #toast div.err { background: var(--danger); }
 
+  /* Confirmation dialog for the destructive NOTIFY actions. */
+  #modal[hidden] { display: none; }
+  #modal {
+    position: fixed;
+    inset: 0;
+    z-index: 20;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    padding: 16px;
+  }
+  #modal .backdrop {
+    position: absolute;
+    inset: 0;
+    background: rgba(0,0,0,.45);
+  }
+  #modal .card {
+    position: relative;
+    background: #fff;
+    border-radius: 8px;
+    box-shadow: 0 12px 40px rgba(0,0,0,.35);
+    width: 100%;
+    max-width: 460px;
+    overflow: hidden;
+    animation: modal-in .12s ease-out;
+  }
+  @keyframes modal-in {
+    from { opacity: 0; transform: translateY(-8px); }
+    to   { opacity: 1; transform: none; }
+  }
+  #modal h2 {
+    margin: 0;
+    padding: 16px 20px;
+    font-size: 16px;
+    border-bottom: 1px solid var(--border);
+  }
+  #modal.is-danger h2 { color: var(--danger); }
+  #modal .body { padding: 16px 20px; }
+  #modal dl {
+    margin: 0 0 14px;
+    display: grid;
+    grid-template-columns: auto 1fr;
+    gap: 4px 12px;
+    font-size: 13px;
+  }
+  #modal dt { color: var(--muted); }
+  #modal dd { margin: 0; }
+  #modal .note { margin: 0; font-size: 13px; color: #444; }
+  #modal .warn {
+    margin: 12px 0 0;
+    padding: 9px 12px;
+    border-radius: 4px;
+    background: #fdeaea;
+    color: var(--danger);
+    font-size: 13px;
+  }
+  #modal .foot {
+    display: flex;
+    justify-content: flex-end;
+    gap: 8px;
+    padding: 12px 20px 16px;
+  }
+  #modal .foot button {
+    padding: 8px 16px;
+    font-size: 14px;
+    border-radius: 4px;
+    border: 1px solid #bbb;
+    background: #fafafa;
+    cursor: pointer;
+  }
+  #modal .foot button:hover { background: #f0f0f0; }
+  #modal .foot button:focus-visible { outline: 2px solid #1976d2; outline-offset: 2px; }
+  #modal .foot button.go {
+    border-color: var(--accent);
+    background: var(--accent);
+    color: #000;
+  }
+  #modal .foot button.go:hover { filter: brightness(1.06); }
+  #modal.is-danger .foot button.go {
+    border-color: var(--danger);
+    background: var(--danger);
+    color: #fff;
+  }
+
   .empty { padding: 24px; color: var(--muted); }
   pre.debug { background: #f7f7f7; padding: 12px; overflow-x: auto; }
 </style>
@@ -149,6 +233,18 @@
 </div>
 
 <div id="toast"></div>
+
+<div id="modal" hidden>
+  <div class="backdrop" data-dismiss></div>
+  <div class="card" role="dialog" aria-modal="true" aria-labelledby="modal-title" aria-describedby="modal-body">
+    <h2 id="modal-title"></h2>
+    <div class="body" id="modal-body"></div>
+    <div class="foot">
+      <button type="button" id="modal-cancel" data-dismiss>Cancel</button>
+      <button type="button" id="modal-go" class="go"></button>
+    </div>
+  </div>
+</div>
 
 <?php if ($es_showdebug): ?>
 <h3>Raw AMI response</h3>
@@ -180,6 +276,14 @@
     { key: 'actions',    label: 'Actions',              sort: false  }
   ];
 
+  // Spelled out in the dialog so the consequence is stated before the click,
+  // not inferred from the button label.
+  var WARNINGS = {
+    restart: 'The phone reboots immediately. Any call in progress on it drops.',
+    reset:   'The phone is reset to factory defaults. Local contacts, account '
+             + 'settings and any manual configuration on the handset are erased.'
+  };
+
   var sortKey = 'aor', sortAsc = true, filter = '';
   var $head = document.getElementById('head');
   var $body = document.getElementById('body');
@@ -201,6 +305,69 @@
     box.appendChild(t);
     setTimeout(function () { t.remove(); }, 6000);
   }
+
+  // -- confirmation dialog --------------------------------------------------
+  // Resolves true if confirmed, false otherwise. Cancel is focused on open and
+  // Escape dismisses, so the destructive actions need a deliberate click.
+  var $modal  = document.getElementById('modal');
+  var $mTitle = document.getElementById('modal-title');
+  var $mBody  = document.getElementById('modal-body');
+  var $mGo    = document.getElementById('modal-go');
+  var $mCancel = document.getElementById('modal-cancel');
+  var modalState = null;
+
+  function closeModal(result) {
+    if (!modalState) { return; }
+    var s = modalState;
+    modalState = null;
+    $modal.hidden = true;
+    $modal.classList.remove('is-danger');
+    document.removeEventListener('keydown', onModalKey, true);
+    if (s.origin && document.contains(s.origin)) { s.origin.focus(); }
+    s.resolve(result);
+  }
+
+  function onModalKey(e) {
+    if (!modalState) { return; }
+    if (e.key === 'Escape') { e.preventDefault(); closeModal(false); return; }
+    if (e.key !== 'Tab') { return; }
+    // Keep focus inside the dialog.
+    var f = [$mCancel, $mGo];
+    var i = f.indexOf(document.activeElement);
+    e.preventDefault();
+    var next = e.shiftKey ? (i <= 0 ? f.length - 1 : i - 1) : (i === f.length - 1 ? 0 : i + 1);
+    f[next].focus();
+  }
+
+  function confirmAction(opts) {
+    return new Promise(function (resolve) {
+      closeModal(false);
+      modalState = { resolve: resolve, origin: opts.origin || null };
+
+      $mTitle.textContent = opts.title;
+      $mGo.textContent = opts.confirmLabel || 'Confirm';
+      $modal.classList.toggle('is-danger', !!opts.danger);
+
+      $mBody.textContent = '';
+      var dl = document.createElement('dl');
+      (opts.details || []).forEach(function (pair) {
+        dl.appendChild(el('dt', pair[0]));
+        dl.appendChild(el('dd', pair[1]));
+      });
+      $mBody.appendChild(dl);
+      if (opts.note) { $mBody.appendChild(el('p', opts.note, 'note')); }
+      if (opts.warning) { $mBody.appendChild(el('p', opts.warning, 'warn')); }
+
+      $modal.hidden = false;
+      document.addEventListener('keydown', onModalKey, true);
+      $mCancel.focus();
+    });
+  }
+
+  $mGo.addEventListener('click', function () { closeModal(true); });
+  $modal.addEventListener('click', function (e) {
+    if (e.target.hasAttribute('data-dismiss')) { closeModal(false); }
+  });
 
   function renderHead() {
     $head.textContent = '';
@@ -274,16 +441,25 @@
       var b = el('button', spec.label);
       if (spec.danger) { b.className = 'danger'; }
       b.addEventListener('click', function () {
-        if (spec.confirm) {
-          // Name the specific handset: an extension can have several contacts
-          // and this only hits the one in this row.
-          var msg = spec.label + '\n\nExtension ' + r.aor +
-                    (r.name ? ' (' + r.name + ')' : '') +
-                    '\n' + r.brand + ' ' + r.model + ' at ' + r.uri_ip +
-                    '\n\nThis affects only this handset. Continue?';
-          if (!window.confirm(msg)) { return; }
-        }
-        sendNotify(r, id, b);
+        if (!spec.confirm) { sendNotify(r, id, b); return; }
+        // Name the specific handset: an extension can have several contacts and
+        // this only reaches the one in this row.
+        confirmAction({
+          title: spec.label,
+          confirmLabel: spec.label,
+          danger: spec.danger,
+          origin: b,
+          details: [
+            ['Extension', r.aor + (r.name ? ' — ' + r.name : '')],
+            ['Device',    (r.brand + ' ' + r.model).trim()],
+            ['Address',   r.uri_ip + ' · ' + r.transport]
+          ],
+          note: 'Only this handset is affected. Other devices registered to '
+                + 'extension ' + r.aor + ' are left alone.',
+          warning: WARNINGS[id] || null
+        }).then(function (go) {
+          if (go) { sendNotify(r, id, b); }
+        });
       });
       td.appendChild(b);
     });
