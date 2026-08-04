@@ -105,6 +105,27 @@
   .actions button:disabled { opacity: .5; cursor: default; }
   .actions button.danger { border-color: #e0b4b4; color: var(--danger); }
   .actions .dash { color: var(--muted); }
+  .actions .verify {
+    display: block;
+    margin-top: 7px;
+    font-size: 12px;
+    white-space: normal;
+    max-width: 230px;
+  }
+  .actions .verify.pending { color: var(--muted); }
+  .actions .verify.good    { color: #2e7d32; }
+  .actions .verify.bad     { color: var(--danger); }
+  .actions .verify .spin {
+    display: inline-block;
+    width: 9px; height: 9px;
+    margin-right: 5px;
+    border: 2px solid #bbb;
+    border-top-color: transparent;
+    border-radius: 50%;
+    animation: spin .7s linear infinite;
+    vertical-align: -1px;
+  }
+  @keyframes spin { to { transform: rotate(360deg); } }
 
   #toast {
     position: fixed;
@@ -260,6 +281,7 @@
   // server-side; the browser only ever names an action.
   var ACTIONS  = <?php echo json_encode($es_actions_public, $es_json_flags); ?>;
   var INTERVAL = <?php echo (int) $es_refresh_seconds; ?> * 1000;
+  var VERIFY_WINDOW = <?php echo (int) $es_verify_window; ?>;
   var rows     = <?php echo json_encode($es_rows, $es_json_flags); ?>;
 
   var COLUMNS = [
@@ -285,6 +307,7 @@
   };
 
   var sortKey = 'aor', sortAsc = true, filter = '';
+  var verifyLines = {};   // contact URI -> the status line under its buttons
   var $head = document.getElementById('head');
   var $body = document.getElementById('body');
   var $empty = document.getElementById('empty');
@@ -454,8 +477,12 @@
             ['Device',    (r.brand + ' ' + r.model).trim()],
             ['Address',   r.uri_ip + ' · ' + r.transport]
           ],
-          note: 'Only this handset is affected. Other devices registered to '
-                + 'extension ' + r.aor + ' are left alone.',
+          // Addressed to this contact URI, so only this handset is reached.
+          note: (r.siblings > 1
+                  ? 'Only this handset. Extension ' + r.aor + ' has ' + r.siblings
+                    + ' registered devices; the others are not touched.'
+                  : 'This is the only device registered to extension ' + r.aor + '.')
+                + ' The phone typically acts on it within ~10s.',
           warning: WARNINGS[id] || null
         }).then(function (go) {
           if (go) { sendNotify(r, id, b); }
@@ -463,12 +490,66 @@
       });
       td.appendChild(b);
     });
+    // Re-attach any verification result for this contact. Appending an existing
+    // node moves it, so it survives the auto-refresh rebuilding the table.
+    if (verifyLines[r.uri]) { td.appendChild(verifyLines[r.uri]); }
     return td;
+  }
+
+  // After a NOTIFY, poll the server until the handset shows up in the access
+  // log re-fetching its config. That is the only end-to-end confirmation there
+  // is: Asterisk reports the NOTIFY dispatched, not that the phone acted.
+  // Only ever runs on demand - never on page load or auto-refresh.
+  function watchForFetch(r, cell) {
+    var old = verifyLines[r.uri];
+    if (old) { old.remove(); }
+
+    var line = el('span', null, 'verify pending');
+    // Kept by contact URI so the auto-refresh re-render can put it back rather
+    // than discarding a verification that is still running.
+    verifyLines[r.uri] = line;
+    line.appendChild(el('span', null, 'spin'));
+    line.appendChild(document.createTextNode('Verifying…'));
+    cell.appendChild(line);
+
+    var since = Math.floor(Date.now() / 1000);
+    var deadline = since + VERIFY_WINDOW;
+    var timer = setInterval(poll, 2000);
+    poll();
+
+    function stop(cls, text) {
+      clearInterval(timer);
+      line.className = 'verify ' + cls;
+      line.textContent = text;
+    }
+
+    function poll() {
+      if (Math.floor(Date.now() / 1000) > deadline) {
+        stop('bad', '✕ No config fetch in ' + VERIFY_WINDOW + 's');
+        return;
+      }
+      var q = '?action=verify&ip=' + encodeURIComponent(r.uri_ip) +
+              '&since=' + since;
+      fetch(window.location.pathname + q, { credentials: 'same-origin' })
+        .then(function (res) { return res.json(); })
+        .then(function (j) {
+          if (!j.ok) { stop('bad', '✕ ' + (j.message || 'verify failed')); return; }
+          if (j.readable === false) {
+            stop('bad', '✕ Access log not readable — cannot verify');
+            return;
+          }
+          if (j.seen) { stop('good', '✓ Config fetched ' + j.at); }
+        })
+        .catch(function () { /* transient - the deadline ends it */ });
+    }
   }
 
   function sendNotify(r, actionId, button) {
     var siblings = button.parentNode.querySelectorAll('button');
     siblings.forEach(function (b) { b.disabled = true; });
+    // Immediate feedback while the request is in flight.
+    var restore = button.textContent;
+    button.textContent = 'Sending…';
 
     var body = new URLSearchParams();
     body.set('action', 'notify');
@@ -488,11 +569,13 @@
     .then(function (j) {
       // Asterisk confirms dispatch, not delivery - say only what is true.
       toast(j.message, j.ok);
+      if (j.ok) { watchForFetch(r, button.parentNode); }
     })
     .catch(function (e) {
       toast('Request failed: ' + e.message, false);
     })
     .finally(function () {
+      button.textContent = restore;
       siblings.forEach(function (b) { b.disabled = false; });
     });
   }

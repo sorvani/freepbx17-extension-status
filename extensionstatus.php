@@ -27,6 +27,15 @@ $es_refresh_default_on = true;
 // Append a dump of the raw AMI response to the page.
 $es_showdebug = false;
 
+// After a NOTIFY, the page watches this log for the handset re-fetching its
+// provisioning files, which is how a check-sync is confirmed to have landed.
+// The web server must be able to read it - see the README. Set to '' to turn
+// the verification step off.
+$es_access_log = '/var/log/apache2/other_vhosts_access.log';
+
+// How long to keep watching before calling it a failure, in seconds.
+$es_verify_window = 30;
+
 // NOTIFY actions, keyed by the brand es_device_info() reports. A brand with no
 // entry here gets no buttons, which is what softphones (Acrobits, Zoiper,
 // MicroSIP, Linphone, Jitsi...) want - they have nothing to check-sync.
@@ -102,9 +111,15 @@ $es_notify_actions = [
 // freepbx_auth opt-out the phonebook generators use must NOT be applied here.
 // ---------------------------------------------------------------------------
 
+$es_t = ['start' => microtime(true)];
+
 if (session_status() === PHP_SESSION_NONE) {
     session_start();
 }
+// session_start() blocks until it can take the per-session lock, so this
+// measures contention with any other request on the same session, not just
+// the read itself.
+$es_t['session'] = microtime(true);
 if (empty($_SESSION['AMP_user'])) {
     http_response_code(403);
     header('Content-Type: text/plain; charset=utf-8');
@@ -114,10 +129,19 @@ if (empty($_SESSION['es_csrf'])) {
     $_SESSION['es_csrf'] = bin2hex(random_bytes(32));
 }
 $es_csrf = $_SESSION['es_csrf'];
+$es_amp_user = $_SESSION['AMP_user'];
+
+// Release the session lock before the slow part of the request. PHP serialises
+// requests that hold the same session open, so without this a button click
+// landing while the auto-refresh is in flight waits for it to finish first.
+// Nothing below writes to the session.
+session_write_close();
+$es_t['unlock'] = microtime(true);
 
 // Load FreePBX bootstrap environment
 include '/etc/freepbx.conf';
 $fcore = FreePBX::Core();
+$es_t['bootstrap'] = microtime(true);
 
 // Load AMI
 global $astman;
@@ -126,7 +150,7 @@ require __DIR__ . '/extensionstatus.lib.php';
 
 // Name for the audit log. Must go through the helper: FreePBX stores an
 // ampuser OBJECT here, and casting that to string is a fatal error.
-$es_user = es_session_username($_SESSION['AMP_user']);
+$es_user = es_session_username($es_amp_user);
 
 if (!is_object($astman)) {
     if (($_GET['action'] ?? '') === 'data' || ($_POST['action'] ?? '') === 'notify') {
@@ -141,16 +165,43 @@ if (($_POST['action'] ?? '') === 'notify') {
     if (!hash_equals($es_csrf, (string) ($_POST['csrf'] ?? ''))) {
         es_json(['ok' => false, 'message' => 'Session expired - reload the page.'], 403);
     }
-    $rows = es_build_rows($astman, $fcore);
+    // Validation only needs uri/brand/aor, so skip the display-name lookups
+    // es_build_rows() would do - this path should stay as short as possible.
     $result = es_send_notify(
         $astman,
         (string) ($_POST['uri'] ?? ''),
         (string) ($_POST['action_id'] ?? ''),
         $es_notify_actions,
-        $rows,
+        es_build_targets($astman),
         $es_user
     );
+    $es_t['dispatch'] = microtime(true);
+    $result += es_timings($es_t);
+    error_log('extensionstatus: notify timing ' . $result['timing']);
     es_json($result, $result['ok'] ? 200 : 400);
+}
+
+// GET ?action=verify: has this handset re-fetched its config since $since?
+// Polled by the browser after a NOTIFY; never touched on a normal page load.
+if (($_GET['action'] ?? '') === 'verify') {
+    $ip    = (string) ($_GET['ip'] ?? '');
+    $since = (int) ($_GET['since'] ?? 0);
+    // Only an IP belonging to a currently registered contact may be queried,
+    // so this cannot be used to sift the access log generally.
+    $known = false;
+    $model = '';
+    foreach (es_build_rows($astman, $fcore) as $r) {
+        if ($r['uri_ip'] === $ip) {
+            $known = true;
+            $model = $r['model'];
+            break;
+        }
+    }
+    if (!$known || $since <= 0) {
+        es_json(['ok' => false, 'message' => 'Unknown contact.'], 400);
+    }
+    $res = es_verify_fetch($es_access_log, $ip, $model, $since - 5);
+    es_json(['ok' => true] + $res);
 }
 
 $es_rows = es_build_rows($astman, $fcore);

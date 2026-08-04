@@ -65,7 +65,53 @@ Add or change actions in the `$es_notify_actions` block at the top of the file;
 each entry notes the `sip_notify_*.conf` section it mirrors.
 
 Asterisk reports success as soon as it dispatches the NOTIFY, including to a URI
-nothing is listening on. A success message means dispatched, not delivered.
+nothing is listening on. A success message means dispatched, not delivered —
+which is what the verification below is for.
+
+### Verification
+
+A check-sync makes the handset re-read its provisioning files, which lands in
+the web server access log. After a button click the row shows `Verifying…` and
+polls for that fetch, then reports `✓ Config fetched 17:10:08` or, after 30s,
+`✕ No config fetch in 30s`. The log is only read after a click — never on page
+load or auto-refresh.
+
+This needs the web server to be able to read the access log. It is `root:adm
+0640` by default and the page runs as `asterisk`:
+
+```bash
+sudo chgrp asterisk /var/log/apache2/other_vhosts_access.log
+sudo chmod 640 /var/log/apache2/other_vhosts_access.log
+```
+
+and, to survive rotation, in the `postrotate` block of
+`/etc/logrotate.d/apache2`:
+
+```bash
+chgrp asterisk /var/log/apache2/other_vhosts_access.log 2>/dev/null || true
+chmod 640 /var/log/apache2/other_vhosts_access.log 2>/dev/null || true
+```
+
+Only that one file. Adding `asterisk` to the `adm` group would work too, but on
+a stock box that grants a web-facing process read on ~92 files including
+`/var/log/auth.log` — don't. Set `$es_access_log = ''` to turn verification off
+instead.
+
+### A note on timing
+
+The NOTIFY targets the **contact URI**, so only the clicked handset is
+addressed. URI mode routes via `default_outbound_endpoint`, which means the
+request carries that identity rather than the extension's:
+
+| | From header |
+| --- | --- |
+| URI mode (this page) | `<sip:dpma_endpoint@…>` |
+| `pjsip send notify … endpoint 103` | `<sip:103@…>` |
+
+Everything else about the two packets is identical and the phone returns
+200 OK immediately either way. Endpoint mode is faster to take effect but
+reaches every device registered to the extension. Measured here, a Yealink
+T44U began re-fetching its config 2s after a URI-mode check-sync.
 
 ## Configuration
 
@@ -76,6 +122,8 @@ At the top of `extensionstatus.php`:
 | `$es_refresh_seconds` | `30` | Auto-refresh interval |
 | `$es_refresh_default_on` | `true` | Whether auto-refresh starts enabled |
 | `$es_showdebug` | `false` | Append a dump of the raw AMI response |
+| `$es_access_log` | `/var/log/apache2/other_vhosts_access.log` | Log watched to confirm a check-sync landed; `''` disables verification |
+| `$es_verify_window` | `30` | Seconds to watch before reporting failure |
 | `$es_notify_actions` | see file | Per-brand NOTIFY actions |
 
 ## License

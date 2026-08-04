@@ -227,9 +227,137 @@ function es_fetch_contacts($astman) {
     return $cache;
 }
 
+/**
+ * Look for a handset fetching its provisioning files since a given time.
+ *
+ * A check-sync makes the phone re-read its config, which lands in the web
+ * server access log as a request for .cfg/.boot on the provisioning vhost.
+ * That is the only end-to-end confirmation available: Asterisk reports the
+ * NOTIFY dispatched, never whether the phone acted on it.
+ *
+ * Only the tail of the log is read - these files grow without bound.
+ *
+ * @return array{seen: bool, at?: string, what?: string, readable: bool}
+ */
+function es_verify_fetch($logfile, $ip, $model, $since) {
+    if ($logfile === '' || !is_readable($logfile)) {
+        return ['seen' => false, 'readable' => false];
+    }
+    $fh = @fopen($logfile, 'rb');
+    if (!$fh) {
+        return ['seen' => false, 'readable' => false];
+    }
+    // Last 256KB is far more than a 30s window can produce.
+    fseek($fh, 0, SEEK_END);
+    $size = ftell($fh);
+    fseek($fh, max(0, $size - 262144));
+    $tail = stream_get_contents($fh);
+    fclose($fh);
+
+    $best = null;
+    foreach (explode("\n", $tail) as $line) {
+        if (strpos($line, $ip) === false) {
+            continue;
+        }
+        // ... [10/Oct/2026:17:02:33 -0500] "GET /y-common.cfg HTTP/1.1" 200 8541 ...
+        if (!preg_match('~\[([^\]]+)\]\s+"(?:GET|POST)\s+(\S+)[^"]*"\s+(\d{3})~', $line, $m)) {
+            continue;
+        }
+        if ($m[3] !== '200') {
+            continue;                       // 401 is the pre-auth probe, not a fetch
+        }
+        if (!preg_match('~\.(cfg|boot)$~i', $m[2])) {
+            continue;
+        }
+        $ts = strtotime(str_replace('/', ' ', preg_replace('~^(\d+)/(\w+)/(\d+):~', '$1 $2 $3 ', $m[1])));
+        if ($ts === false || $ts < $since) {
+            continue;
+        }
+        // Prefer a line whose User-Agent names this model: several handsets can
+        // share one public IP.
+        $exact = ($model !== '' && stripos($line, $model) !== false);
+        if ($best === null || $exact) {
+            $best = ['at' => date('H:i:s', $ts), 'what' => $m[2], 'exact' => $exact];
+            if ($exact) {
+                break;
+            }
+        }
+    }
+
+    if ($best === null) {
+        return ['seen' => false, 'readable' => true];
+    }
+    return ['seen' => true, 'readable' => true, 'at' => $best['at'], 'what' => $best['what']];
+}
+
+/**
+ * Turn the request checkpoints into a per-phase breakdown.
+ *
+ * Reported to the browser and the error log so a slow click can be attributed
+ * to a phase instead of guessed at. 'session' is time spent waiting for the
+ * PHP session lock - PHP serialises concurrent requests on one session, so a
+ * click that lands while another request holds it queues behind that request.
+ */
+function es_timings(array $t) {
+    $ms = function ($a, $b) use ($t) {
+        return (int) round((($t[$b] ?? 0) - ($t[$a] ?? 0)) * 1000);
+    };
+    $parts = [
+        'session'   => $ms('start', 'session'),
+        'bootstrap' => $ms('unlock', 'bootstrap'),
+        'dispatch'  => $ms('bootstrap', 'dispatch'),
+    ];
+    $total = (int) round((($t['dispatch'] ?? microtime(true)) - $t['start']) * 1000);
+    $out = [];
+    foreach ($parts as $k => $v) { $out[] = "$k={$v}ms"; }
+    return [
+        'ms'     => $total,
+        'timing' => implode(' ', $out) . " total={$total}ms",
+    ];
+}
+
+/**
+ * Minimal contact list for validating a NOTIFY target.
+ *
+ * Same shape es_send_notify() needs, but without the per-extension display-name
+ * lookups es_build_rows() performs - a button click has no use for them.
+ */
+function es_build_targets($astman) {
+    $contacts = es_fetch_contacts($astman);
+    $counts   = es_registration_counts($contacts);
+    $targets  = [];
+    foreach ($contacts as $data) {
+        $endpoint = (string) ($data['EndpointName'] ?? ($data['AOR'] ?? ''));
+        $targets[] = [
+            'uri'      => (string) ($data['URI'] ?? ''),
+            'aor'      => (string) ($data['AOR'] ?? ''),
+            'endpoint' => $endpoint,
+            'siblings' => $counts[$endpoint] ?? 1,
+            'brand'    => es_device_info((string) ($data['UserAgent'] ?? ''))['brand'],
+        ];
+    }
+    return $targets;
+}
+
+/**
+ * How many contacts each endpoint currently has registered.
+ *
+ * NOTIFY is sent per endpoint, so this is how many devices a single click
+ * actually reaches - stated in the UI rather than left as a surprise.
+ */
+function es_registration_counts(array $contacts) {
+    $counts = [];
+    foreach ($contacts as $data) {
+        $endpoint = (string) ($data['EndpointName'] ?? ($data['AOR'] ?? ''));
+        $counts[$endpoint] = ($counts[$endpoint] ?? 0) + 1;
+    }
+    return $counts;
+}
+
 /** Build the normalized row set the page and the JSON endpoint both use. */
 function es_build_rows($astman, $fcore) {
     $results = es_fetch_contacts($astman);
+    $counts  = es_registration_counts($results);
 
     $rows = [];
     foreach ($results as $data) {
@@ -269,6 +397,8 @@ function es_build_rows($astman, $fcore) {
             'callid_ip'  => es_ip_or_placeholder(es_last_after((string) ($data['CallID'] ?? ''), '@')),
             'expire'     => $expire_unix,
             'expire_str' => $expire_str,
+            // Devices a NOTIFY to this extension will reach.
+            'siblings'   => $counts[(string) ($data['EndpointName'] ?? $aor)] ?? 1,
         ];
     }
     return $rows;
@@ -277,12 +407,29 @@ function es_build_rows($astman, $fcore) {
 /**
  * Send a SIP NOTIFY to a single contact via the AMI PJSIPNotify action.
  *
- * Targets the contact URI rather than the endpoint, so an extension with
- * several registered contacts only gets the NOTIFY on the handset that was
- * clicked. URI mode routes through pjsip.conf's default_outbound_endpoint.
+ * Targets the contact URI, so an extension registered on several devices only
+ * gets the NOTIFY on the handset whose row was clicked.
+ *
+ * KNOWN AND ACCEPTED: URI mode routes through pjsip.conf's
+ * default_outbound_endpoint, so the request carries that identity rather than
+ * the extension's. Captured from a live Yealink T44U, the two modes differ in
+ * exactly one field - request-URI, To, Event and Subscription-State are
+ * identical, and the phone returns 200 OK in the same second either way:
+ *
+ *   URI mode       From: <sip:dpma_endpoint@104.207.139.250>
+ *   endpoint mode  From: <sip:103@104.207.139.250>
+ *
+ * AMI accepts exactly one of Endpoint/URI/Channel, so URI mode cannot be given
+ * a corrected From. Endpoint mode reaches every device registered to the
+ * extension; per-contact precision is worth more here.
+ *
+ * Measured on this box: NOTIFY dispatched at 17:02:31, the handset began
+ * re-fetching its provisioning files at 17:02:33 - about 2-3s. A check-sync
+ * always leaves that trail, so whether one landed is verifiable from the web
+ * server access log rather than by watching the phone.
  *
  * Asterisk answers "Success: NOTIFY sent" as soon as it dispatches - including
- * for a URI nothing is listening on. It confirms dispatch, never delivery.
+ * for a target nothing is listening on. It confirms dispatch, never delivery.
  */
 function es_send_notify($astman, $uri, $action, array $actionmap, array $rows, $who) {
     // Only a URI that is currently a registered contact is targetable. Asterisk
@@ -323,7 +470,8 @@ function es_send_notify($astman, $uri, $action, array $actionmap, array $rows, $
     return [
         'ok'      => $ok,
         'message' => $ok
-            ? 'NOTIFY dispatched to extension ' . $match['aor'] . '.'
+            ? 'NOTIFY dispatched to extension ' . $match['aor']
+              . '. The handset typically acts on it within ~10s.'
             : (string) ($resp['Message'] ?? 'Asterisk rejected the request.'),
     ];
 }
