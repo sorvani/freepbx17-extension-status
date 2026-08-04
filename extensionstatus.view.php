@@ -281,7 +281,10 @@
   // server-side; the browser only ever names an action.
   var ACTIONS  = <?php echo json_encode($es_actions_public, $es_json_flags); ?>;
   var INTERVAL = <?php echo (int) $es_refresh_seconds; ?> * 1000;
-  var VERIFY_WINDOW = <?php echo (int) $es_verify_window; ?>;
+  var VERIFY_WINDOW  = <?php echo (int) $es_verify_window; ?>;
+  // False when the access log is not readable by the web server. That is a
+  // supported setup, so the page just never offers verification - no warning.
+  var VERIFY_ENABLED = <?php echo $es_verify_enabled ? 'true' : 'false'; ?>;
   var rows     = <?php echo json_encode($es_rows, $es_json_flags); ?>;
 
   var COLUMNS = [
@@ -523,6 +526,14 @@
       line.textContent = text;
     }
 
+    // Verification became unavailable (log rotated away from us, or turned
+    // off). Not the operator's problem mid-click - remove the line silently.
+    function abandon() {
+      clearInterval(timer);
+      line.remove();
+      delete verifyLines[r.uri];
+    }
+
     function poll() {
       if (Math.floor(Date.now() / 1000) > deadline) {
         stop('bad', '✕ No config fetch in ' + VERIFY_WINDOW + 's');
@@ -533,11 +544,7 @@
       fetch(window.location.pathname + q, { credentials: 'same-origin' })
         .then(function (res) { return res.json(); })
         .then(function (j) {
-          if (!j.ok) { stop('bad', '✕ ' + (j.message || 'verify failed')); return; }
-          if (j.readable === false) {
-            stop('bad', '✕ Access log not readable — cannot verify');
-            return;
-          }
+          if (!j.ok || j.readable === false) { abandon(); return; }
           if (j.seen) { stop('good', '✓ Config fetched ' + j.at); }
         })
         .catch(function () { /* transient - the deadline ends it */ });
@@ -569,7 +576,7 @@
     .then(function (j) {
       // Asterisk confirms dispatch, not delivery - say only what is true.
       toast(j.message, j.ok);
-      if (j.ok) { watchForFetch(r, button.parentNode); }
+      if (j.ok && VERIFY_ENABLED) { watchForFetch(r, button.parentNode); }
     })
     .catch(function (e) {
       toast('Request failed: ' + e.message, false);

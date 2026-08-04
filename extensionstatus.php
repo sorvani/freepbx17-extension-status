@@ -204,6 +204,12 @@ if (($_GET['action'] ?? '') === 'verify') {
     es_json(['ok' => true] + $res);
 }
 
+// Verification is optional: it needs the web server to be able to read the
+// access log, which is a deliberate permission change an operator may decline.
+// Declining is a supported configuration, not an error - when it is off the
+// page simply never offers the check.
+$es_verify_enabled = ($es_access_log !== '' && is_readable($es_access_log));
+
 $es_rows = es_build_rows($astman, $fcore);
 
 // GET ?action=data: rows only, for the auto-refresh.

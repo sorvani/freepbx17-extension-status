@@ -14,13 +14,29 @@ Tested on Debian 12 (bookworm), FreePBX 17, Asterisk 22.10.1, PHP 8.2 under
 
 ## Install
 
-Three files, all into the same directory:
+```bash
+git clone https://github.com/sorvani/freepbx17-extension-status.git
+cd freepbx17-extension-status
+sudo ./install.sh
+```
+
+Then open `https://YOUR-PBX/custom/extensionstatus.php` while logged in to the
+FreePBX admin GUI.
+
+To also enable NOTIFY verification, which needs one log permission change:
 
 ```bash
-for f in extensionstatus.php extensionstatus.lib.php extensionstatus.view.php; do
-  sudo install -o asterisk -g asterisk -m 644 "$f" "/var/www/html/custom/$f"
-done
+ENABLE_VERIFY_LOG=1 sudo -E ./install.sh
 ```
+
+### Install details
+
+Installs to `/var/www/html/custom/` (override with `DEST=... sudo -E ./install.sh`),
+owned `asterisk:asterisk` mode 644, backing up any file it would change and
+running `php -l` over the result. It refuses to run if `mod_php` is not loaded,
+since Apache would otherwise serve the PHP source instead of executing it.
+
+Three files, all in the same directory:
 
 | File | Contents |
 | --- | --- |
@@ -28,8 +44,16 @@ done
 | `extensionstatus.lib.php` | AMI access, User-Agent parsing, NOTIFY dispatch |
 | `extensionstatus.view.php` | markup, styling, browser code |
 
-Then open `https://YOUR-PBX/custom/extensionstatus.php` while logged in to the
-FreePBX admin GUI.
+By hand instead:
+
+```bash
+for f in extensionstatus.php extensionstatus.lib.php extensionstatus.view.php; do
+  sudo install -o asterisk -g asterisk -m 644 "$f" "/var/www/html/custom/$f"
+done
+```
+
+`/var/www/html/custom/` is the right home for these: it is served by the admin
+vhost and FreePBX never writes there, so upgrades leave it alone.
 
 ## Access control
 
@@ -76,8 +100,14 @@ polls for that fetch, then reports `✓ Config fetched 17:10:08` or, after 30s,
 `✕ No config fetch in 30s`. The log is only read after a click — never on page
 load or auto-refresh.
 
-This needs the web server to be able to read the access log. It is `root:adm
-0640` by default and the page runs as `asterisk`:
+This needs the web server to be able to read the access log, which is
+`root:adm 0640` by default while the page runs as `asterisk`. Either:
+
+```bash
+ENABLE_VERIFY_LOG=1 sudo -E ./install.sh
+```
+
+or by hand:
 
 ```bash
 sudo chgrp asterisk /var/log/apache2/other_vhosts_access.log
@@ -94,8 +124,12 @@ chmod 640 /var/log/apache2/other_vhosts_access.log 2>/dev/null || true
 
 Only that one file. Adding `asterisk` to the `adm` group would work too, but on
 a stock box that grants a web-facing process read on ~92 files including
-`/var/log/auth.log` — don't. Set `$es_access_log = ''` to turn verification off
-instead.
+`/var/log/auth.log` — don't.
+
+**Verification is entirely optional.** If you would rather not touch log
+permissions, change nothing, or set `$es_access_log = ''`. The page detects that
+the log is unreadable and simply omits the check — no warning, no error line,
+everything else works exactly the same. The NOTIFY buttons do not depend on it.
 
 ### A note on timing
 
