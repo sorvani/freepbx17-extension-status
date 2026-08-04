@@ -1,0 +1,3 @@
+# Local secrets. This repo is public -- never commit this file.
+# Holds GITHUB_TOKEN for the gh CLI (gh has no auth login session on this box).
+.env
