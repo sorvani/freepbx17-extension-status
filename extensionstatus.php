@@ -276,7 +276,10 @@ if (($_GET['action'] ?? '') === 'verify') {
     }
     // Live contacts only - no state file, so a remembered-but-gone device is
     // correctly reported as not registered.
-    $live = es_build_rows($astman, $fcore, null, null, 7, $es_no_action_models);
+    // Built WITH remembered state: a handset that is mid-reboot is not in the
+    // live contact list, and its stored User-Agent is where its MAC comes from.
+    // Those rows carry registered=false, so the registration answer stays right.
+    $live = es_build_rows($astman, $fcore, null, $es_state_file, $es_retain_days, $es_no_action_models);
 
     // Both facts, every time. They are independent and their order is not
     // fixed: a handset fetches its config during boot, which is BEFORE it can
@@ -284,28 +287,34 @@ if (($_GET['action'] ?? '') === 'verify') {
     // So report each piece and let the caller decide what it needs.
     $key   = (string) ($_GET['key'] ?? '');
     $ip    = (string) ($_GET['ip'] ?? '');
+    $brand = '';
     $model = '';
+    $mac   = '';
     $registered = false;
     foreach ($live as $r) {
-        if (!$r['registered']) {
-            continue;
-        }
         $match = $key !== ''
             ? es_device_key($r['aor'], $r['brand'], $r['model']) === $key
-            : $r['uri_ip'] === $ip;
-        if ($match) {
-            $registered = true;
-            $model = $r['model'];
-            $ip    = $r['uri_ip'];
-            break;
+            : ($r['registered'] && $r['uri_ip'] === $ip);
+        if (!$match) {
+            continue;
         }
+        $registered = $r['registered'];
+        $brand = $r['brand'];
+        $model = $r['model'];
+        // Straight from the SIP User-Agent where the make publishes it. Only
+        // when it does not does es_verify_fetch() fall back to the access log.
+        $mac   = es_mac_from_ua($r['useragent']);
+        if ($r['uri_ip'] !== '') {
+            $ip = $r['uri_ip'];
+        }
+        break;
     }
 
     // The address is needed to search the log. While the handset is down it is
     // not in the live set, so fall back to whatever the caller last knew.
     $fetch = ['seen' => false, 'readable' => true];
     if ($ip !== '') {
-        $fetch = es_verify_fetch($es_access_log, $ip, $model, $since - 5);
+        $fetch = es_verify_fetch($es_access_log, $ip, $brand, $model, $since - 5, $mac);
     }
 
     es_json([
