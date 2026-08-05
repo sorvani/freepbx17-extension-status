@@ -291,6 +291,7 @@ if (($_GET['action'] ?? '') === 'verify') {
     $model = '';
     $mac   = '';
     $registered = false;
+    $status = '';
     foreach ($live as $r) {
         $match = $key !== ''
             ? es_device_key($r['aor'], $r['brand'], $r['model']) === $key
@@ -299,6 +300,7 @@ if (($_GET['action'] ?? '') === 'verify') {
             continue;
         }
         $registered = $r['registered'];
+        $status = $r['status'];
         $brand = $r['brand'];
         $model = $r['model'];
         // Straight from the SIP User-Agent where the make publishes it. Only
@@ -317,9 +319,16 @@ if (($_GET['action'] ?? '') === 'verify') {
         $fetch = es_verify_fetch($es_access_log, $ip, $brand, $model, $since - 5, $mac);
     }
 
+    // 'reachable', not just 'registered', is what says a handset went away.
+    // A rebooting Yealink keeps its contact until the registration expires, so
+    // Asterisk still lists it and only flips Status to Unreachable via qualify.
+    // A Fanvil drops the contact outright. Watching registration alone sees the
+    // Fanvil reboot and misses the Yealink one entirely.
     es_json([
         'ok'         => true,
         'registered' => $registered,
+        'reachable'  => $registered && strcasecmp($status, 'Reachable') === 0,
+        'status'     => $status,
         'seen'       => $fetch['seen'],
         'readable'   => $fetch['readable'],
     ] + (isset($fetch['at']) ? ['at' => $fetch['at']] : []));

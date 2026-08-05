@@ -656,8 +656,11 @@
           if (j.readable === false) { abandon(); return; }
           if (!j.ok) { return; }
 
-          if (j.registered === false) { sawDown = true; }
-          else if (sawDown) { cameBack = true; }
+          // "Went away" means unreachable, not merely unregistered. A Yealink
+          // holds its registration through a reboot and only goes Unreachable;
+          // a Fanvil drops the contact. Both have to count.
+          if (j.reachable === false) { sawDown = true; }
+          else if (j.reachable === true && sawDown) { cameBack = true; }
           if (j.seen && !gotConfig) { gotConfig = true; configAt = j.at || ''; }
 
           // This poll already knows whether the device is registered, so do not
@@ -666,7 +669,8 @@
           // registration alone does not say Reachable vs Unreachable, and the
           // RTT, addresses and expiry all move at the same time.
           var cur = currentRow(key);
-          if (cur && cur.registered !== j.registered) { refresh(); }
+          if (cur && (cur.registered !== j.registered ||
+                      (j.status && cur.status !== j.status))) { refresh(); }
 
           var done = (mode === 'register') ? (cameBack && gotConfig) : gotConfig;
           if (done) {
