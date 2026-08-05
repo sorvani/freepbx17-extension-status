@@ -354,8 +354,44 @@ function es_registration_counts(array $contacts) {
     return $counts;
 }
 
-/** Build the normalized row set the page and the JSON endpoint both use. */
-function es_build_rows($astman, $fcore) {
+/**
+ * Every PJSIP device FreePBX knows about, as extension => display name.
+ *
+ * This is what makes the Status column mean something: without it the page can
+ * only list contacts that are currently registered, so a phone that drops off
+ * silently vanishes and every row always reads "Reachable".
+ *
+ * getAllDevicesByType('pjsip') is used rather than PJSIPShowEndpoints because
+ * Asterisk's endpoint list also contains trunks (ACI, FSL, GMIC...), and rather
+ * than getAllUsers() because that includes non-device extensions such as the
+ * UCP template.
+ */
+function es_pjsip_devices($fcore) {
+    $out = [];
+    $devices = $fcore->getAllDevicesByType('pjsip');
+    if (!is_array($devices)) {
+        return $out;
+    }
+    foreach ($devices as $d) {
+        if (!is_array($d)) {
+            continue;
+        }
+        $ext = (string) ($d['user'] ?? $d['id'] ?? '');
+        if ($ext === '') {
+            continue;
+        }
+        $out[$ext] = (string) ($d['description'] ?? '');
+    }
+    return $out;
+}
+
+/**
+ * Build the normalized row set the page and the JSON endpoint both use.
+ *
+ * $devices exists so the unregistered-device merge can be tested without
+ * unregistering a real phone; production callers leave it null.
+ */
+function es_build_rows($astman, $fcore, $devices = null) {
     $results = es_fetch_contacts($astman);
     $counts  = es_registration_counts($results);
 
@@ -399,6 +435,44 @@ function es_build_rows($astman, $fcore) {
             'expire_str' => $expire_str,
             // Devices a NOTIFY to this extension will reach.
             'siblings'   => $counts[(string) ($data['EndpointName'] ?? $aor)] ?? 1,
+            'registered' => true,
+        ];
+    }
+
+    // Anything configured but not currently registered gets a row of its own,
+    // so a phone that drops off is visible as down rather than just absent.
+    $seen = [];
+    foreach ($rows as $r) {
+        $seen[$r['aor']] = true;
+    }
+    foreach (($devices === null ? es_pjsip_devices($fcore) : $devices) as $ext => $name) {
+        // PHP turns a numeric-string array key into an int, so cast back or the
+        // JSON carries 101 for these rows and "101" for every other one.
+        $ext = (string) $ext;
+        if (isset($seen[$ext])) {
+            continue;
+        }
+        $rows[] = [
+            'aor'        => $ext,
+            'endpoint'   => $ext,
+            'uri'        => '',
+            'name'       => $name !== '' ? $name : es_display_name($fcore, $ext),
+            'brand'      => '',
+            'model'      => '',
+            'firmware'   => '',
+            'useragent'  => '',
+            'transport'  => '',
+            // Distinct from Asterisk's own "Unreachable", which means a contact
+            // IS registered but is not answering qualify. This one is gone.
+            'status'     => 'Unregistered',
+            'rtt_ms'     => null,
+            'uri_ip'     => '',
+            'via_ip'     => '',
+            'callid_ip'  => '',
+            'expire'     => null,
+            'expire_str' => '-',
+            'siblings'   => 0,
+            'registered' => false,
         ];
     }
     return $rows;
