@@ -65,14 +65,26 @@ $es_no_action_models = [
 // file at all. Add an action by adding an entry below; nothing needs reloading.
 // Each set notes the sip_notify_*.conf section it mirrors. Those files escape
 // the semicolon as "\;" for their own parser, which is not needed here.
+//
+// 'verify' says how to confirm the action landed, because the right evidence
+// differs by action:
+//   'config'   the handset re-reads its provisioning files - seen in the web
+//              server access log. Correct for a plain check-sync.
+//   'register' the handset drops its registration and comes back - seen over
+//              AMI. Correct for anything that reboots, and the ONLY option for
+//              a Fanvil, which reboots without re-reading its config at all.
+//   'none'     no way to confirm; the page will not claim one.
 $es_notify_actions = [
     'Yealink' => [
         // sip_notify_custom.conf: reload-yealink / restart-yealink / default-yealink
         'reload'  => ['label' => 'Reload config', 'confirm' => false, 'danger' => false,
+                      'verify' => 'config',
                       'headers' => ['Event' => 'check-sync;reboot=false']],
         'restart' => ['label' => 'Reboot',        'confirm' => true,  'danger' => true,
+                      'verify' => 'register',
                       'headers' => ['Event' => 'check-sync;reboot=true']],
         'reset'   => ['label' => 'Factory reset', 'confirm' => true,  'danger' => true,
+                      'verify' => 'register',
                       'headers' => ['Content-Type' => 'message/sipfrag',
                                     'Event'        => 'ACTION-URI',
                                     'Content'      => 'key=Reset']],
@@ -80,25 +92,31 @@ $es_notify_actions = [
     'Snom' => [
         // sip_notify_additional.conf: snom-check-cfg / snom-reboot-cfg / reboot-snom
         'reload'  => ['label' => 'Reload config', 'confirm' => false, 'danger' => false,
+                      'verify' => 'config',
                       'headers' => ['Event' => 'check-sync;reboot=false']],
         'restart' => ['label' => 'Reboot',        'confirm' => true,  'danger' => true,
+                      'verify' => 'register',
                       'headers' => ['Event' => 'check-sync;reboot=true']],
     ],
     'Sangoma' => [
         // sip_notify_additional.conf: sync-noreboot-sangoma / sync-reboot-sangoma
         'reload'  => ['label' => 'Reload config', 'confirm' => false, 'danger' => false,
+                      'verify' => 'config',
                       'headers' => ['Event' => 'check-sync;reboot=false']],
         'restart' => ['label' => 'Reboot',        'confirm' => true,  'danger' => true,
+                      'verify' => 'register',
                       'headers' => ['Event' => 'check-sync;reboot=true']],
     ],
     'Polycom' => [
         // sip_notify_additional.conf: polycom-check-cfg
         'reload'  => ['label' => 'Reload config', 'confirm' => false, 'danger' => false,
+                      'verify' => 'config',
                       'headers' => ['Event' => 'check-sync']],
     ],
     'Grandstream' => [
         // sip_notify_additional.conf: grandstream-check-cfg
         'reload'  => ['label' => 'Reload config', 'confirm' => false, 'danger' => false,
+                      'verify' => 'config',
                       'headers' => ['Event' => 'check-sync']],
     ],
     'Fanvil' => [
@@ -109,21 +127,25 @@ $es_notify_actions = [
         // immediately - so this is a reboot button and is treated as one,
         // confirmation and all. Mislabelling it would drop someone's call.
         'restart' => ['label' => 'Reboot', 'confirm' => true, 'danger' => true,
+                      'verify' => 'register',
                       'headers' => ['Event' => 'check-sync']],
     ],
     'Cisco' => [
         // sip_notify_additional.conf: cisco-check-cfg
         'reload'  => ['label' => 'Reload config', 'confirm' => false, 'danger' => false,
+                      'verify' => 'config',
                       'headers' => ['Event' => 'check-sync']],
     ],
     'Algo' => [
         // sip_notify_additional.conf: algo-check-cfg
         'reload'  => ['label' => 'Reload config', 'confirm' => false, 'danger' => false,
+                      'verify' => 'config',
                       'headers' => ['Event' => 'check-sync']],
     ],
     'OBIHAI' => [
         // sip_notify_additional.conf: obihai-check-cfg
         'reload'  => ['label' => 'Reload config', 'confirm' => false, 'danger' => false,
+                      'verify' => 'config',
                       'headers' => ['Event' => 'sync']],
     ],
 ];
@@ -210,24 +232,49 @@ if (($_POST['action'] ?? '') === 'notify') {
 // GET ?action=verify: has this handset re-fetched its config since $since?
 // Polled by the browser after a NOTIFY; never touched on a normal page load.
 if (($_GET['action'] ?? '') === 'verify') {
-    $ip    = (string) ($_GET['ip'] ?? '');
+    $mode  = (string) ($_GET['mode'] ?? 'config');
     $since = (int) ($_GET['since'] ?? 0);
-    // Only an IP belonging to a currently registered contact may be queried,
-    // so this cannot be used to sift the access log generally.
+    if ($since <= 0) {
+        es_json(['ok' => false, 'message' => 'Bad request.'], 400);
+    }
+    // Live contacts only - no state file, so a remembered-but-gone device is
+    // correctly reported as not registered.
+    $live = es_build_rows($astman, $fcore, null, null, 7, $es_no_action_models);
+
+    if ($mode === 'register') {
+        // Reboot evidence: the device stops registering and comes back. The
+        // client watches for that transition; this only reports the current
+        // state. Keyed on extension|brand|model, so it survives the contact
+        // URI changing when the handset re-registers on a new port.
+        $key = (string) ($_GET['key'] ?? '');
+        $found = false;
+        foreach ($live as $r) {
+            if ($r['registered'] && es_device_key($r['aor'], $r['brand'], $r['model']) === $key) {
+                $found = true;
+                break;
+            }
+        }
+        es_json(['ok' => true, 'mode' => 'register', 'registered' => $found]);
+    }
+
+    // Config-fetch evidence, read from the access log.
+    $ip = (string) ($_GET['ip'] ?? '');
     $known = false;
     $model = '';
-    foreach (es_build_rows($astman, $fcore) as $r) {
-        if ($r['uri_ip'] === $ip) {
+    foreach ($live as $r) {
+        if ($r['registered'] && $r['uri_ip'] === $ip) {
             $known = true;
             $model = $r['model'];
             break;
         }
     }
-    if (!$known || $since <= 0) {
-        es_json(['ok' => false, 'message' => 'Unknown contact.'], 400);
+    if (!$known) {
+        // The handset may simply be mid-reboot. Not an error - the client keeps
+        // watching until its own deadline rather than giving up here.
+        es_json(['ok' => true, 'mode' => 'config', 'seen' => false, 'readable' => true]);
     }
     $res = es_verify_fetch($es_access_log, $ip, $model, $since - 5);
-    es_json(['ok' => true] + $res);
+    es_json(['ok' => true, 'mode' => 'config'] + $res);
 }
 
 // Verification is optional: it needs the web server to be able to read the
@@ -253,6 +300,9 @@ foreach ($es_notify_actions as $brand => $actions) {
             'label'   => $spec['label'],
             'confirm' => $spec['confirm'],
             'danger'  => $spec['danger'],
+            // How to confirm it landed. Not a secret - it only selects which
+            // evidence the browser watches for.
+            'verify'  => $spec['verify'] ?? 'config',
         ];
     }
 }

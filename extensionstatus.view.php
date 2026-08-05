@@ -333,7 +333,13 @@
   };
 
   var sortKey = 'aor', sortAsc = true, filter = '';
-  var verifyLines = {};   // contact URI -> the status line under its buttons
+  // Keyed on extension|brand|model, matching the server's device key - NOT the
+  // contact URI. A rebooting handset loses its contact entirely and comes back
+  // on a new port, so a URI key would drop the status line exactly when it
+  // matters most.
+  var verifyLines = {};
+
+  function deviceKey(r) { return r.aor + '|' + r.brand + '|' + r.model; }
   var $head = document.getElementById('head');
   var $body = document.getElementById('body');
   var $empty = document.getElementById('empty');
@@ -533,7 +539,7 @@
     });
     // Re-attach any verification result for this contact. Appending an existing
     // node moves it, so it survives the auto-refresh rebuilding the table.
-    if (verifyLines[r.uri]) { td.appendChild(verifyLines[r.uri]); }
+    if (verifyLines[deviceKey(r)]) { td.appendChild(verifyLines[deviceKey(r)]); }
     return td;
   }
 
@@ -541,48 +547,77 @@
   // log re-fetching its config. That is the only end-to-end confirmation there
   // is: Asterisk reports the NOTIFY dispatched, not that the phone acted.
   // Only ever runs on demand - never on page load or auto-refresh.
-  function watchForFetch(r, cell) {
-    var old = verifyLines[r.uri];
+  function watchForFetch(r, cell, mode) {
+    if (mode === 'none') { return; }
+    var key = deviceKey(r);
+    var old = verifyLines[key];
     if (old) { old.remove(); }
 
     var line = el('span', null, 'verify pending');
-    // Kept by contact URI so the auto-refresh re-render can put it back rather
+    // Kept by device key so the auto-refresh re-render can put it back rather
     // than discarding a verification that is still running.
-    verifyLines[r.uri] = line;
-    line.appendChild(el('span', null, 'spin'));
-    line.appendChild(document.createTextNode('Verifying…'));
+    verifyLines[key] = line;
+    var spin = el('span', null, 'spin');
+    var text = document.createTextNode('Verifying…');
+    line.appendChild(spin);
+    line.appendChild(text);
     cell.appendChild(line);
 
     var since = Math.floor(Date.now() / 1000);
     var deadline = since + VERIFY_WINDOW;
+    var sawDown = false;
     var timer = setInterval(poll, 2000);
     poll();
 
-    function stop(cls, text) {
+    function stop(cls, msg) {
       clearInterval(timer);
       line.className = 'verify ' + cls;
-      line.textContent = text;
+      line.textContent = msg;
     }
+    function say(msg) { text.nodeValue = msg; }
 
-    // Verification became unavailable (log rotated away from us, or turned
-    // off). Not the operator's problem mid-click - remove the line silently.
+    // Verification is unavailable (log unreadable, or turned off). That is a
+    // supported configuration, not a fault - drop the line silently.
     function abandon() {
       clearInterval(timer);
       line.remove();
-      delete verifyLines[r.uri];
+      delete verifyLines[key];
+    }
+
+    function timedOut() {
+      if (mode === 'register') {
+        stop('bad', sawDown
+          ? '✕ Did not come back in ' + VERIFY_WINDOW + 's'
+          : '✕ No reboot seen in ' + VERIFY_WINDOW + 's');
+      } else {
+        stop('bad', '✕ No config fetch in ' + VERIFY_WINDOW + 's');
+      }
     }
 
     function poll() {
-      if (Math.floor(Date.now() / 1000) > deadline) {
-        stop('bad', '✕ No config fetch in ' + VERIFY_WINDOW + 's');
-        return;
-      }
-      var q = '?action=verify&ip=' + encodeURIComponent(r.uri_ip) +
-              '&since=' + since;
+      if (Math.floor(Date.now() / 1000) > deadline) { timedOut(); return; }
+
+      var q = (mode === 'register')
+        ? '?action=verify&mode=register&key=' + encodeURIComponent(key) + '&since=' + since
+        : '?action=verify&ip=' + encodeURIComponent(r.uri_ip) + '&since=' + since;
+
       fetch(window.location.pathname + q, { credentials: 'same-origin' })
         .then(function (res) { return res.json(); })
         .then(function (j) {
-          if (!j.ok || j.readable === false) { abandon(); return; }
+          // Only give up for good on an unusable setup. A transient failure -
+          // the handset being mid-reboot, say - must not end the watch.
+          if (j.readable === false) { abandon(); return; }
+          if (!j.ok) { return; }
+
+          if (mode === 'register') {
+            if (!j.registered) {
+              sawDown = true;
+              say('Rebooting…');
+            } else if (sawDown) {
+              stop('good', '✓ Back online ' + new Date().toTimeString().slice(0, 8));
+            }
+            return;
+          }
           if (j.seen) { stop('good', '✓ Config fetched ' + j.at); }
         })
         .catch(function () { /* transient - the deadline ends it */ });
@@ -614,7 +649,7 @@
     .then(function (j) {
       // Asterisk confirms dispatch, not delivery - say only what is true.
       toast(j.message, j.ok);
-      if (j.ok && VERIFY_ENABLED) { watchForFetch(r, button.parentNode); }
+      if (j.ok && VERIFY_ENABLED) { watchForFetch(r, button.parentNode, spec.verify || 'config'); }
     })
     .catch(function (e) {
       toast('Request failed: ' + e.message, false);
