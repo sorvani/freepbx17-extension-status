@@ -56,6 +56,21 @@
     min-width: 240px;
     font-size: 14px;
   }
+  /* Match the search input's height and border so the toolbar reads as one
+     row rather than a styled field next to a raw browser button. */
+  .toolbar button {
+    padding: 7px 14px;
+    font-size: 14px;
+    line-height: 1.4;
+    color: #222;
+    background: #fff;
+    border: 1px solid var(--border);
+    border-radius: 4px;
+    cursor: pointer;
+  }
+  .toolbar button:hover { background: var(--hover); border-color: #b8b8b8; }
+  .toolbar button:active { background: #ececec; }
+  .toolbar button:focus-visible { outline: 2px solid #1976d2; outline-offset: 2px; }
   .toolbar label { display: flex; align-items: center; gap: 6px; }
   .spacer { flex: 1; }
   .meta { color: var(--muted); font-size: 13px; }
@@ -511,7 +526,7 @@
       var b = el('button', spec.label);
       if (spec.danger) { b.className = 'danger'; }
       b.addEventListener('click', function () {
-        if (!spec.confirm) { sendNotify(r, id, b); return; }
+        if (!spec.confirm) { sendNotify(r, id, b, spec.verify || 'config'); return; }
         // Name the specific handset: an extension can have several contacts and
         // this only reaches the one in this row.
         confirmAction({
@@ -532,7 +547,7 @@
                 + ' The phone typically acts on it within ~10s.',
           warning: WARNINGS[id] || null
         }).then(function (go) {
-          if (go) { sendNotify(r, id, b); }
+          if (go) { sendNotify(r, id, b, spec.verify || 'config'); }
         });
       });
       td.appendChild(b);
@@ -624,7 +639,9 @@
     }
   }
 
-  function sendNotify(r, actionId, button) {
+  // mode comes from the action spec, which lives in actionCell's scope - it has
+  // to be passed in, not reached for.
+  function sendNotify(r, actionId, button, mode) {
     var siblings = button.parentNode.querySelectorAll('button');
     siblings.forEach(function (b) { b.disabled = true; });
     // Immediate feedback while the request is in flight.
@@ -649,7 +666,7 @@
     .then(function (j) {
       // Asterisk confirms dispatch, not delivery - say only what is true.
       toast(j.message, j.ok);
-      if (j.ok && VERIFY_ENABLED) { watchForFetch(r, button.parentNode, spec.verify || 'config'); }
+      if (j.ok && VERIFY_ENABLED) { watchForFetch(r, button.parentNode, mode || 'config'); }
     })
     .catch(function (e) {
       toast('Request failed: ' + e.message, false);

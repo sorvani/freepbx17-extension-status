@@ -686,8 +686,9 @@ function es_send_notify($astman, $uri, $action, array $actionmap, array $rows, $
     return [
         'ok'      => $ok,
         'message' => $ok
-            ? 'NOTIFY dispatched to extension ' . $match['aor']
-              . '. The handset typically acts on it within ~10s.'
+            // No timing claim: it varies by action and by handset, and the
+            // status line under the buttons reports what actually happened.
+            ? 'NOTIFY dispatched to extension ' . $match['aor'] . '.'
             : (string) ($resp['Message'] ?? 'Asterisk rejected the request.'),
     ];
 }
