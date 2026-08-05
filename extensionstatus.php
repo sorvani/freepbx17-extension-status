@@ -71,8 +71,16 @@ $es_no_action_models = [
 //   'config'   the handset re-reads its provisioning files - seen in the web
 //              server access log. Correct for a plain check-sync.
 //   'register' the handset drops its registration and comes back - seen over
-//              AMI. Correct for anything that reboots, and the ONLY option for
-//              a Fanvil, which reboots without re-reading its config at all.
+//              AMI. Correct for anything that reboots.
+//
+// Config fetches are a poor signal for a reboot. Every phone re-reads its
+// config on boot, and a Yealink also reads it before rebooting - so a reboot
+// produces one fetch or two depending on the make, and the first of them says
+// only that the NOTIFY arrived, not that the phone actually came back. A
+// Fanvil reboots first and fetches during boot, so a fetch-based watch would
+// sit idle through the whole boot cycle and then report on a phone that might
+// still be down. Re-registration is the thing worth confirming, so that is
+// what a reboot waits for.
 //   'none'     no way to confirm; the page will not claim one.
 $es_notify_actions = [
     'Yealink' => [
@@ -122,10 +130,11 @@ $es_notify_actions = [
     'Fanvil' => [
         // sip_notify_additional.conf: fanvil-check-cfg
         //
-        // Deliberately NOT labelled "Reload config". A Fanvil reboots on
-        // check-sync rather than re-reading its config, and it does so
-        // immediately - so this is a reboot button and is treated as one,
-        // confirmation and all. Mislabelling it would drop someone's call.
+        // Deliberately NOT labelled "Reload config". A Fanvil reboots
+        // immediately on check-sync rather than reading its config first the
+        // way a Yealink does - it re-reads during boot, once it is already
+        // down. Either way the phone goes away, so this is a reboot button and
+        // is treated as one. Mislabelling it would drop a call without warning.
         'restart' => ['label' => 'Reboot', 'confirm' => true, 'danger' => true,
                       'verify' => 'register',
                       'headers' => ['Event' => 'check-sync']],
