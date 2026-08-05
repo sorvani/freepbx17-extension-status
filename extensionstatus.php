@@ -33,8 +33,29 @@ $es_showdebug = false;
 // the verification step off.
 $es_access_log = '/var/log/apache2/other_vhosts_access.log';
 
-// How long to keep watching before calling it a failure, in seconds.
-$es_verify_window = 30;
+// How long to keep watching before calling it a failure, in seconds. A reload
+// shows up in ~2s, but a reboot has to complete a full boot cycle before the
+// handset fetches anything, so this is sized for the slow case - it only
+// affects how long a genuine failure takes to report.
+$es_verify_window = 150;
+
+// Devices seen registered are remembered here so one that drops off is shown
+// as Unregistered rather than silently vanishing. Must be writable by the web
+// server and OUTSIDE the document root - it records every extension's public
+// IP. Set to '' to disable (rows then vanish on drop-off, as before).
+$es_state_file = '/var/lib/asterisk/extensionstatus-devices.json';
+
+// Forget a device that has not been seen for this long.
+$es_retain_days = 7;
+
+// Models that carry a hardware brand's name but are actually softphones, so
+// they must not inherit that brand's buttons. "Sangoma Talk/1.0.18 (build ...;
+// iOS 26.5.2; arm64-neon)" parses to brand Sangoma / model Talk, which would
+// otherwise offer the Sangoma desk-phone reboot. Matched case-insensitively on
+// the model, and enforced server-side as well as in the UI.
+$es_no_action_models = [
+    'Sangoma' => ['Talk', 'Connect'],
+];
 
 // NOTIFY actions, keyed by the brand es_device_info() reports. A brand with no
 // entry here gets no buttons, which is what softphones (Acrobits, Zoiper,
@@ -82,7 +103,12 @@ $es_notify_actions = [
     ],
     'Fanvil' => [
         // sip_notify_additional.conf: fanvil-check-cfg
-        'reload'  => ['label' => 'Reload config', 'confirm' => false, 'danger' => false,
+        //
+        // Deliberately NOT labelled "Reload config". A Fanvil reboots on
+        // check-sync rather than re-reading its config, and it does so
+        // immediately - so this is a reboot button and is treated as one,
+        // confirmation and all. Mislabelling it would drop someone's call.
+        'restart' => ['label' => 'Reboot', 'confirm' => true, 'danger' => true,
                       'headers' => ['Event' => 'check-sync']],
     ],
     'Cisco' => [
@@ -172,7 +198,7 @@ if (($_POST['action'] ?? '') === 'notify') {
         (string) ($_POST['uri'] ?? ''),
         (string) ($_POST['action_id'] ?? ''),
         $es_notify_actions,
-        es_build_targets($astman),
+        es_build_targets($astman, $es_no_action_models),
         $es_user
     );
     $es_t['dispatch'] = microtime(true);
@@ -210,7 +236,7 @@ if (($_GET['action'] ?? '') === 'verify') {
 // page simply never offers the check.
 $es_verify_enabled = ($es_access_log !== '' && is_readable($es_access_log));
 
-$es_rows = es_build_rows($astman, $fcore);
+$es_rows = es_build_rows($astman, $fcore, null, $es_state_file, $es_retain_days, $es_no_action_models);
 
 // GET ?action=data: rows only, for the auto-refresh.
 if (($_GET['action'] ?? '') === 'data') {
