@@ -517,8 +517,12 @@
     // User-Agent, such as Sangoma Talk.
     var available = (r.registered && r.actionable !== false) ? ACTIONS[r.brand] : null;
     if (!available) {
-      // Softphone or unrecognised brand - nothing sensible to send it.
+      // Softphone, unrecognised brand, or a device that has dropped off.
       td.appendChild(el('span', '—', 'dash'));
+      // Still re-attach any verification in flight. A reboot makes the row go
+      // Unregistered and land here, which is exactly when the watch matters -
+      // returning early would discard it.
+      attachVerify(td, r);
       return td;
     }
     Object.keys(available).forEach(function (id) {
@@ -552,10 +556,15 @@
       });
       td.appendChild(b);
     });
-    // Re-attach any verification result for this contact. Appending an existing
-    // node moves it, so it survives the auto-refresh rebuilding the table.
-    if (verifyLines[deviceKey(r)]) { td.appendChild(verifyLines[deviceKey(r)]); }
+    attachVerify(td, r);
     return td;
+  }
+
+  // Re-attach any verification line for this device. Appending an existing node
+  // moves it, so it survives the auto-refresh rebuilding the whole table.
+  function attachVerify(td, r) {
+    var line = verifyLines[deviceKey(r)];
+    if (line) { td.appendChild(line); }
   }
 
   // After a NOTIFY, poll the server until the handset shows up in the access
