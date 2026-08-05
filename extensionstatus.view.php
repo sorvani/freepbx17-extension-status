@@ -355,6 +355,15 @@
   var verifyLines = {};
 
   function deviceKey(r) { return r.aor + '|' + r.brand + '|' + r.model; }
+
+  // The row object held by a watcher goes stale as soon as the table reloads,
+  // so look the device up in the current set rather than trusting the closure.
+  function currentRow(key) {
+    for (var i = 0; i < rows.length; i++) {
+      if (deviceKey(rows[i]) === key) { return rows[i]; }
+    }
+    return null;
+  }
   var $head = document.getElementById('head');
   var $body = document.getElementById('body');
   var $empty = document.getElementById('empty');
@@ -650,6 +659,14 @@
           if (j.registered === false) { sawDown = true; }
           else if (sawDown) { cameBack = true; }
           if (j.seen && !gotConfig) { gotConfig = true; configAt = j.at || ''; }
+
+          // This poll already knows whether the device is registered, so do not
+          // let the table sit on stale state until the next auto-refresh. Pull
+          // fresh rows on the transition rather than patching the status text:
+          // registration alone does not say Reachable vs Unreachable, and the
+          // RTT, addresses and expiry all move at the same time.
+          var cur = currentRow(key);
+          if (cur && cur.registered !== j.registered) { refresh(); }
 
           var done = (mode === 'register') ? (cameBack && gotConfig) : gotConfig;
           if (done) {
