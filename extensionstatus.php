@@ -205,6 +205,34 @@ global $astman;
 
 require __DIR__ . '/extensionstatus.lib.php';
 
+// Verification is optional: it needs the web server to be able to read the
+// access log, which is a deliberate permission change an operator may decline.
+// Declining is a supported configuration, not an error - when it is off the
+// page simply never offers the check.
+$es_verify_enabled = ($es_access_log !== '' && is_readable($es_access_log));
+
+// A "Reload config" only means something if the handset has a provisioning
+// server to reload from, and the way we confirm one worked is by watching that
+// server's access log. So with verification off, assume the phones were
+// programmed by hand and drop those actions entirely rather than offering a
+// button that may do nothing. Reboot and Factory reset are unaffected - they
+// are confirmed by re-registration and need no provisioning server.
+//
+// Filtering the map itself rather than just the UI means the NOTIFY endpoint
+// rejects them too, since it validates against this same list.
+if (!$es_verify_enabled) {
+    foreach ($es_notify_actions as $brand => $actions) {
+        foreach ($actions as $id => $spec) {
+            if (($spec['verify'] ?? 'config') === 'config') {
+                unset($es_notify_actions[$brand][$id]);
+            }
+        }
+        if (empty($es_notify_actions[$brand])) {
+            unset($es_notify_actions[$brand]);
+        }
+    }
+}
+
 // Name for the audit log. Must go through the helper: FreePBX stores an
 // ampuser OBJECT here, and casting that to string is a fatal error.
 $es_user = es_session_username($es_amp_user);
@@ -250,47 +278,43 @@ if (($_GET['action'] ?? '') === 'verify') {
     // correctly reported as not registered.
     $live = es_build_rows($astman, $fcore, null, null, 7, $es_no_action_models);
 
-    if ($mode === 'register') {
-        // Reboot evidence: the device stops registering and comes back. The
-        // client watches for that transition; this only reports the current
-        // state. Keyed on extension|brand|model, so it survives the contact
-        // URI changing when the handset re-registers on a new port.
-        $key = (string) ($_GET['key'] ?? '');
-        $found = false;
-        foreach ($live as $r) {
-            if ($r['registered'] && es_device_key($r['aor'], $r['brand'], $r['model']) === $key) {
-                $found = true;
-                break;
-            }
-        }
-        es_json(['ok' => true, 'mode' => 'register', 'registered' => $found]);
-    }
-
-    // Config-fetch evidence, read from the access log.
-    $ip = (string) ($_GET['ip'] ?? '');
-    $known = false;
+    // Both facts, every time. They are independent and their order is not
+    // fixed: a handset fetches its config during boot, which is BEFORE it can
+    // register again, while a Yealink also fetches before it reboots at all.
+    // So report each piece and let the caller decide what it needs.
+    $key   = (string) ($_GET['key'] ?? '');
+    $ip    = (string) ($_GET['ip'] ?? '');
     $model = '';
+    $registered = false;
     foreach ($live as $r) {
-        if ($r['registered'] && $r['uri_ip'] === $ip) {
-            $known = true;
+        if (!$r['registered']) {
+            continue;
+        }
+        $match = $key !== ''
+            ? es_device_key($r['aor'], $r['brand'], $r['model']) === $key
+            : $r['uri_ip'] === $ip;
+        if ($match) {
+            $registered = true;
             $model = $r['model'];
+            $ip    = $r['uri_ip'];
             break;
         }
     }
-    if (!$known) {
-        // The handset may simply be mid-reboot. Not an error - the client keeps
-        // watching until its own deadline rather than giving up here.
-        es_json(['ok' => true, 'mode' => 'config', 'seen' => false, 'readable' => true]);
-    }
-    $res = es_verify_fetch($es_access_log, $ip, $model, $since - 5);
-    es_json(['ok' => true, 'mode' => 'config'] + $res);
-}
 
-// Verification is optional: it needs the web server to be able to read the
-// access log, which is a deliberate permission change an operator may decline.
-// Declining is a supported configuration, not an error - when it is off the
-// page simply never offers the check.
-$es_verify_enabled = ($es_access_log !== '' && is_readable($es_access_log));
+    // The address is needed to search the log. While the handset is down it is
+    // not in the live set, so fall back to whatever the caller last knew.
+    $fetch = ['seen' => false, 'readable' => true];
+    if ($ip !== '') {
+        $fetch = es_verify_fetch($es_access_log, $ip, $model, $since - 5);
+    }
+
+    es_json([
+        'ok'         => true,
+        'registered' => $registered,
+        'seen'       => $fetch['seen'],
+        'readable'   => $fetch['readable'],
+    ] + (isset($fetch['at']) ? ['at' => $fetch['at']] : []));
+}
 
 $es_rows = es_build_rows($astman, $fcore, null, $es_state_file, $es_retain_days, $es_no_action_models);
 

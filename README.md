@@ -111,11 +111,39 @@ which is what the verification below is for.
 
 ### Verification
 
-A check-sync makes the handset re-read its provisioning files, which lands in
-the web server access log. After a button click the row shows `Verifying…` and
-polls for that fetch, then reports `✓ Config fetched 17:10:08` or, after 30s,
-`✕ No config fetch in 30s`. The log is only read after a click — never on page
-load or auto-refresh.
+After a button click the row shows `Verifying…` and polls until it can confirm
+what happened, or gives up after `$es_verify_window` seconds. Nothing is polled
+on page load or during the auto-refresh — only after a click.
+
+What counts as confirmation depends on the action:
+
+| Action | What must be observed | Reported |
+| --- | --- | --- |
+| Reload config | an HTTP **200** on its config in the access log | `✓ Config fetched 17:10:08` |
+| Reboot, Factory reset | it goes away and registers again, **and** an HTTP **200** on its config | `✓ Rebooted, config fetched 20:04:31` |
+
+Both facts are watched independently, from the moment the button is clicked.
+**No order is assumed between them** — a handset fetches its config during
+boot, which is *before* it can register again, and a Yealink also fetches
+before it reboots at all. So each is simply looked for, and the action is
+confirmed once all of them have been seen.
+
+Progress updates as pieces land: `Verifying…` → `Rebooting…` → `Back online,
+waiting on config…` → `✓ Rebooted, config fetched`. A timeout names what was
+missing rather than just failing — e.g. `✕ no config fetch in 150s`, which
+usually means the handset is not provisioned from this server.
+
+> [!IMPORTANT]
+> **Verification assumes the handsets are provisioned from a server.** The
+> Reload config check watches for the phone fetching its config files over
+> HTTP(S); a phone that was programmed by hand through its web UI never fetches
+> anything, so that check can never pass for it.
+>
+> Because of that, **`Reload config` buttons are hidden entirely when
+> verification is off** — no provisioning server is assumed, so a config reload
+> would have nothing to reload from. `Reboot` and `Factory reset` are still
+> offered: they are confirmed by re-registration, which does not depend on
+> provisioning at all.
 
 #### What it needs, and why
 

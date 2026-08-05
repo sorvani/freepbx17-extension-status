@@ -589,7 +589,13 @@
 
     var since = Math.floor(Date.now() / 1000);
     var deadline = since + VERIFY_WINDOW;
-    var sawDown = false;
+    // Independent facts, each just watched for. No order is assumed between
+    // them: a handset fetches its config during boot, which is before it can
+    // register again, and a Yealink fetches before rebooting as well.
+    var sawDown = false;      // it went away
+    var cameBack = false;     // it registered again after going away
+    var gotConfig = false;    // an HTTP 200 on its config since the click
+    var configAt = '';
     var timer = setInterval(poll, 2000);
     poll();
 
@@ -608,22 +614,30 @@
       delete verifyLines[key];
     }
 
+    // What still has not been seen, so a failure names the missing piece rather
+    // than just saying it did not work.
     function timedOut() {
-      if (mode === 'register') {
-        stop('bad', sawDown
-          ? '✕ Did not come back in ' + VERIFY_WINDOW + 's'
-          : '✕ No reboot seen in ' + VERIFY_WINDOW + 's');
-      } else {
-        stop('bad', '✕ No config fetch in ' + VERIFY_WINDOW + 's');
-      }
+      var missing = [];
+      if (mode === 'register' && !cameBack) { missing.push(sawDown ? 'did not come back' : 'no reboot seen'); }
+      if (!gotConfig) { missing.push('no config fetch'); }
+      stop('bad', '✕ ' + missing.join(', ') + ' in ' + VERIFY_WINDOW + 's');
+    }
+
+    function progress() {
+      if (mode !== 'register') { return 'Verifying…'; }
+      if (!sawDown) { return 'Verifying…'; }
+      if (!cameBack) { return 'Rebooting…'; }
+      return 'Back online, waiting on config…';
     }
 
     function poll() {
       if (Math.floor(Date.now() / 1000) > deadline) { timedOut(); return; }
 
-      var q = (mode === 'register')
-        ? '?action=verify&mode=register&key=' + encodeURIComponent(key) + '&since=' + since
-        : '?action=verify&ip=' + encodeURIComponent(r.uri_ip) + '&since=' + since;
+      // One request reports both facts. ip is sent as a fallback for while the
+      // handset is down and cannot be resolved from the live contact list.
+      var q = '?action=verify&key=' + encodeURIComponent(key) +
+              '&ip=' + encodeURIComponent(r.uri_ip) +
+              '&since=' + since;
 
       fetch(window.location.pathname + q, { credentials: 'same-origin' })
         .then(function (res) { return res.json(); })
@@ -633,16 +647,17 @@
           if (j.readable === false) { abandon(); return; }
           if (!j.ok) { return; }
 
-          if (mode === 'register') {
-            if (!j.registered) {
-              sawDown = true;
-              say('Rebooting…');
-            } else if (sawDown) {
-              stop('good', '✓ Back online ' + new Date().toTimeString().slice(0, 8));
-            }
-            return;
+          if (j.registered === false) { sawDown = true; }
+          else if (sawDown) { cameBack = true; }
+          if (j.seen && !gotConfig) { gotConfig = true; configAt = j.at || ''; }
+
+          var done = (mode === 'register') ? (cameBack && gotConfig) : gotConfig;
+          if (done) {
+            stop('good', (mode === 'register' ? '✓ Rebooted, config fetched ' : '✓ Config fetched ')
+                         + configAt);
+          } else {
+            say(progress());
           }
-          if (j.seen) { stop('good', '✓ Config fetched ' + j.at); }
         })
         .catch(function () { /* transient - the deadline ends it */ });
     }
