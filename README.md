@@ -217,7 +217,10 @@ At the top of `extensionstatus.php`:
 | `$es_refresh_default_on` | `true` | Whether auto-refresh starts enabled |
 | `$es_showdebug` | `false` | Append a dump of the raw AMI response |
 | `$es_access_log` | `/var/log/apache2/other_vhosts_access.log` | Log watched to confirm a check-sync landed; `''` disables verification |
-| `$es_verify_window` | `30` | Seconds to watch before reporting failure |
+| `$es_verify_window` | `150` | Seconds to watch before reporting failure |
+| `$es_state_file` | `/var/lib/asterisk/extensionstatus-devices.json` | Remembers seen devices so one that drops off shows as Unregistered; `''` disables |
+| `$es_retain_days` | `7` | Forget a remembered device unseen for this long |
+| `$es_no_action_models` | see file | Models carrying a hardware brand's name that are really softphones |
 | `$es_notify_actions` | see file | Per-brand NOTIFY actions |
 
 ## License
