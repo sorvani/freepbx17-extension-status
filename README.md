@@ -88,9 +88,11 @@ opposite case.
 
 ## NOTIFY actions
 
-Buttons appear on rows whose brand has an action set defined, and target the
-**contact URI**, so an extension registered on both a desk phone and a softphone
-only gets the NOTIFY on the handset whose row you clicked.
+Buttons appear on rows whose brand has an action set defined, and by default
+target the **contact URI**, so an extension registered on both a desk phone and
+a softphone only gets the NOTIFY on the handset whose row you clicked. A chip in
+the toolbar states which way the page is set — `NOTIFY: this handset only` or,
+with `$es_notify_target = 'endpoint'`, `NOTIFY: whole extension`.
 
 | Brand | Actions |
 | --- | --- |
@@ -193,19 +195,23 @@ not depend on it.
 
 ### A note on timing
 
-The NOTIFY targets the **contact URI**, so only the clicked handset is
-addressed. URI mode routes via `default_outbound_endpoint`, which means the
+By default the NOTIFY targets the **contact URI**, so only the clicked handset
+is addressed. URI mode routes via `default_outbound_endpoint`, which means the
 request carries that identity rather than the extension's:
 
 | | From header |
 | --- | --- |
-| URI mode (this page) | `<sip:dpma_endpoint@…>` |
-| `pjsip send notify … endpoint 103` | `<sip:103@…>` |
+| URI mode (the default) | `<sip:dpma_endpoint@…>` |
+| endpoint mode, `pjsip send notify … endpoint 103` | `<sip:103@…>` |
 
 Everything else about the two packets is identical and the phone returns
 200 OK immediately either way. Endpoint mode is faster to take effect but
 reaches every device registered to the extension. Measured here, a Yealink
 T44U began re-fetching its config 2s after a URI-mode check-sync.
+
+A box with no usable `default_outbound_endpoint` answers `Success: NOTIFY sent`
+and puts nothing on the wire, so the button looks like it worked while the phone
+never moves. Set `$es_notify_target = 'endpoint'` there.
 
 ## Configuration
 
@@ -216,6 +222,7 @@ At the top of `extensionstatus.php`:
 | `$es_refresh_seconds` | `30` | Auto-refresh interval |
 | `$es_refresh_default_on` | `true` | Whether auto-refresh starts enabled |
 | `$es_showdebug` | `false` | Append a dump of the raw AMI response |
+| `$es_notify_target` | `'uri'` | `'uri'` reaches the clicked handset; `'endpoint'` reaches every device on the extension |
 | `$es_access_log` | `/var/log/apache2/other_vhosts_access.log` | Log watched to confirm a check-sync landed; `''` disables verification |
 | `$es_verify_window` | `150` | Seconds to watch before reporting failure |
 | `$es_state_file` | `/var/lib/asterisk/extensionstatus-devices.json` | Remembers seen devices so one that drops off shows as Unregistered; `''` disables |

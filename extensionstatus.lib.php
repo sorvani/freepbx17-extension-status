@@ -701,6 +701,21 @@ function es_build_rows($astman, $fcore, $devices = null, $statefile = null, $ret
  * for a target nothing is listening on. It confirms dispatch, never delivery.
  */
 /**
+ * How a NOTIFY should be addressed: 'uri' or 'endpoint'.
+ *
+ * Straight off $es_notify_target, defaulting to URI mode. This deliberately
+ * does NOT probe Asterisk first. URI mode needs a usable
+ * default_outbound_endpoint, but there is nothing reliable to test for - a box
+ * without one answers "Success: NOTIFY sent" just the same - so a probe would
+ * cost two AMI round trips on every page load and still guess. URI mode is
+ * simply the default; if a box rejects it, es_send_notify() says so and names
+ * the setting to change.
+ */
+function es_notify_mode($configured) {
+    return $configured === 'endpoint' ? 'endpoint' : 'uri';
+}
+
+/**
  * Ask Asterisk to probe an endpoint's contacts now, rather than at its next
  * scheduled qualify.
  *
@@ -730,7 +745,7 @@ function es_qualify($astman, $aor) {
     return isset($resp['Response']) && strcasecmp((string) $resp['Response'], 'Success') === 0;
 }
 
-function es_send_notify($astman, $uri, $action, array $actionmap, array $rows, $who) {
+function es_send_notify($astman, $uri, $action, array $actionmap, array $rows, $who, $mode = 'uri') {
     // Only a URI that is currently a registered contact is targetable. Asterisk
     // will happily accept anything here, so this check is the real constraint.
     $match = null;
@@ -755,28 +770,48 @@ function es_send_notify($astman, $uri, $action, array $actionmap, array $rows, $
         return ['ok' => false, 'message' => 'That action is not available for a ' . $match['brand'] . ' device.'];
     }
     // Defence in depth: a CR or LF in a header value would let the rest of the
-    // string be read as further AMI headers.
-    if (preg_match('/[\r\n]/', $uri)) {
+    // string be read as further AMI headers. Both fields originate with
+    // Asterisk, not the browser, but they still go on the wire verbatim.
+    if (preg_match('/[\r\n]/', $uri) || preg_match('/[\r\n]/', (string) $match['endpoint'])) {
         return ['ok' => false, 'message' => 'Invalid contact URI.'];
     }
 
-    $resp = $astman->send_request('PJSIPNotify', [
-        'URI'      => $uri,
-        'Variable' => $allowed[$action]['headers'],
-    ]);
+    // AMI accepts exactly one of Endpoint/URI/Channel, so the mode picks which
+    // one is sent - it is not a pair of options on the same request.
+    if ($mode === 'uri') {
+        $params = ['URI' => $uri, 'Variable' => $allowed[$action]['headers']];
+        $logged = $uri;
+    } else {
+        $params = ['Endpoint' => $match['endpoint'], 'Variable' => $allowed[$action]['headers']];
+        $logged = 'endpoint ' . $match['endpoint'];
+    }
+
+    $resp = $astman->send_request('PJSIPNotify', $params);
     $ok = isset($resp['Response']) && strcasecmp((string) $resp['Response'], 'Success') === 0;
 
     error_log(sprintf(
-        'extensionstatus: %s sent %s to %s (ext %s) - %s',
-        $who, $action, $uri, $match['aor'], $ok ? 'dispatched' : 'FAILED'
+        'extensionstatus: %s sent %s to %s (ext %s, %s mode) - %s',
+        $who, $action, $logged, $match['aor'], $mode, $ok ? 'dispatched' : 'FAILED'
     ));
 
-    return [
-        'ok'      => $ok,
-        'message' => $ok
-            // No timing claim: it varies by action and by handset, and the
-            // status line under the buttons reports what actually happened.
-            ? 'NOTIFY dispatched to extension ' . $match['aor'] . '.'
-            : (string) ($resp['Message'] ?? 'Asterisk rejected the request.'),
-    ];
+    if (!$ok) {
+        $msg = (string) ($resp['Message'] ?? 'Asterisk rejected the request.');
+        // The one failure worth explaining rather than just relaying.
+        if ($mode === 'uri' && stripos($msg, 'endpoint') !== false) {
+            $msg .= ' URI-mode NOTIFY needs a working default_outbound_endpoint'
+                  . ' - set $es_notify_target to "endpoint" to address the'
+                  . ' extension instead.';
+        }
+        return ['ok' => false, 'message' => $msg];
+    }
+
+    // No timing claim: it varies by action and by handset, and the status line
+    // under the buttons reports what actually happened. The device count is
+    // worth stating though - in endpoint mode the click moved more than the
+    // row it was on.
+    $message = ($mode === 'endpoint' && $match['siblings'] > 1)
+        ? 'NOTIFY dispatched to all ' . $match['siblings'] . ' devices registered to extension ' . $match['aor'] . '.'
+        : 'NOTIFY dispatched to extension ' . $match['aor'] . '.';
+
+    return ['ok' => true, 'message' => $message];
 }

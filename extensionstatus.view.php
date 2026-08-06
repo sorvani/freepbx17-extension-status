@@ -72,6 +72,18 @@
   .toolbar button:active { background: #ececec; }
   .toolbar button:focus-visible { outline: 2px solid #1976d2; outline-offset: 2px; }
   .toolbar label { display: flex; align-items: center; gap: 6px; }
+
+  /* Which devices a NOTIFY reaches is not recoverable from the buttons, so it
+     is stated in the toolbar. Endpoint mode is tinted: it is the wider blast
+     radius, not the default. */
+  .mode {
+    font-size: 12px;
+    padding: 3px 9px;
+    border-radius: 10px;
+    background: #eee;
+    color: #555;
+  }
+  .mode.endpoint { background: #fff8e1; color: #7a5b00; }
   .spacer { flex: 1; }
   .meta { color: var(--muted); font-size: 13px; }
 
@@ -279,6 +291,13 @@
   <input type="search" id="filter" placeholder="Filter (extension, name, brand, IP...)" autocomplete="off">
   <label><input type="checkbox" id="autorefresh"<?php echo $es_refresh_default_on ? ' checked' : ''; ?>> Auto-refresh every <?php echo (int) $es_refresh_seconds; ?>s</label>
   <button type="button" id="refreshnow">Refresh now</button>
+  <span class="mode <?php echo es_h($es_mode); ?>" id="mode" title="<?php
+    echo $es_mode === 'uri'
+      ? 'A NOTIFY is addressed to the contact URI, so only the handset whose row you click is reached.'
+      : 'A NOTIFY is addressed to the extension, so it reaches every device registered to it. Set $es_notify_target to "uri" to reach one handset at a time.';
+  ?>"><?php
+    echo $es_mode === 'uri' ? 'NOTIFY: this handset only' : 'NOTIFY: whole extension';
+  ?></span>
   <div class="spacer"></div>
   <span class="meta" id="meta"></span>
 </div>

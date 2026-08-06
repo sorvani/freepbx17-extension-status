@@ -27,6 +27,22 @@ $es_refresh_default_on = true;
 // Append a dump of the raw AMI response to the page.
 $es_showdebug = false;
 
+// How a NOTIFY is addressed:
+//   'uri'       target the contact URI - only the handset whose row was clicked
+//   'endpoint'  target the endpoint - EVERY device registered to that extension
+//
+// URI mode is the precise one and the default. It routes through pjsip.conf's
+// default_outbound_endpoint, so the request goes out carrying that identity
+// rather than the extension's. A box without a usable one still answers
+// "Success: NOTIFY sent", puts nothing on the wire, and logs only a warning -
+// so the button appears to work while the phone never moves. es_send_notify()
+// names this setting if Asterisk rejects a URI-mode request.
+//
+// 'endpoint' needs no such thing and always works, but it reaches every device
+// registered to the extension: a reboot aimed at one desk phone takes the
+// softphone on the same extension down with it.
+$es_notify_target = 'uri';
+
 // After a NOTIFY, the page watches this log for the handset re-fetching its
 // provisioning files, which is how a check-sync is confirmed to have landed.
 // The web server must be able to read it - see the README. Set to '' to turn
@@ -258,7 +274,8 @@ if (($_POST['action'] ?? '') === 'notify') {
         (string) ($_POST['action_id'] ?? ''),
         $es_notify_actions,
         es_build_targets($astman, $es_no_action_models),
-        $es_user
+        $es_user,
+        es_notify_mode($es_notify_target)
     );
     $es_t['dispatch'] = microtime(true);
     $result += es_timings($es_t);
@@ -352,6 +369,7 @@ $es_rows = es_build_rows($astman, $fcore, null, $es_state_file, $es_retain_days,
 if (($_GET['action'] ?? '') === 'data') {
     es_json(['ok' => true, 'rows' => $es_rows, 'generated' => date('H:i:s')]);
 }
+$es_mode = es_notify_mode($es_notify_target);
 $es_json_flags = JSON_HEX_TAG | JSON_HEX_AMP | JSON_HEX_APOS | JSON_HEX_QUOT | JSON_UNESCAPED_SLASHES;
 
 // Strip the NOTIFY headers before handing the action map to the browser: the
