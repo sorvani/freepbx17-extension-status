@@ -290,6 +290,7 @@ if (($_GET['action'] ?? '') === 'verify') {
     $brand = '';
     $model = '';
     $mac   = '';
+    $aor   = '';
     $registered = false;
     $status = '';
     foreach ($live as $r) {
@@ -303,6 +304,7 @@ if (($_GET['action'] ?? '') === 'verify') {
         $status = $r['status'];
         $brand = $r['brand'];
         $model = $r['model'];
+        $aor   = $r['aor'];
         // Straight from the SIP User-Agent where the make publishes it. Only
         // when it does not does es_verify_fetch() fall back to the access log.
         $mac   = es_mac_from_ua($r['useragent']);
@@ -310,6 +312,16 @@ if (($_GET['action'] ?? '') === 'verify') {
             $ip = $r['uri_ip'];
         }
         break;
+    }
+
+    // Status below is only as fresh as Asterisk's last qualify, which is once a
+    // minute by default - long enough for a rebooted handset to be back and
+    // answering calls while this still reports it Unreachable. When a reboot is
+    // being watched, force a probe so the next poll reflects the phone rather
+    // than the schedule. The caller throttles it; the name is the one resolved
+    // from the live contact above, never a string from the query.
+    if (($_GET['probe'] ?? '') === '1' && $aor !== '') {
+        es_qualify($astman, $aor);
     }
 
     // The address is needed to search the log. While the handset is down it is
